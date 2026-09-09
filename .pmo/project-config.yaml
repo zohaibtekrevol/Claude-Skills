@@ -1,0 +1,87 @@
+schema_version: "1.0"
+
+project:
+  id: "SMART-BASKET"
+  name: "Smart Basket"
+  client: "Smart Basket / eBasket KSA"
+  pm: "Muneeb"
+  project_type: ""
+  platforms: []
+  commercial_model: ""
+
+repository:
+  provider: "bitbucket"
+  workspace: "devops-tekrevol"
+  repository: "lets-explore-more-specs"
+  remote: "origin"
+  working_branch: "pmo-artifacts"
+  verified: false
+
+artifacts:
+  root: "docs/pmo"
+
+  intent:
+    path: "docs/pmo/intent"
+    latest_version: null
+    status: "NOT_CREATED"
+
+  scope:
+    path: "docs/pmo/scope"
+    latest_version: null
+    approved_version: null
+    status: "NOT_CREATED"
+
+  specifications:
+    path: "docs/pmo/specs"
+    latest_version: null
+    approved_version: null
+    status: "NOT_CREATED"
+
+  feedback:
+    path: "docs/pmo/feedback"
+    latest_id: null
+    total_count: 0
+
+  decisions:
+    path: "docs/pmo/decisions"
+    latest_id: null
+
+  change_requests:
+    path: "docs/pmo/cr"
+    latest_id: null
+
+  exports:
+    path: "docs/pmo/exports"
+
+workflow:
+  current_stage: "INITIALIZED"
+
+  intent:
+    required: true
+    approved: false
+
+  scope:
+    required: true
+    approved: false
+
+  specifications:
+    requires_approved_scope: true
+
+  feedback:
+    classification_required: true
+
+  change_request:
+    pm_approval_required: true
+    client_approval_required: true
+    commercial_clearance_required: true
+
+  publishing:
+    repository_validation_required: true
+    artifact_validation_required: true
+
+governance:
+  source_of_truth: "repository"
+  markdown_authoritative: true
+  docx_export_only: true
+  approved_artifacts_immutable: true
+  silent_assumptions_prohibited: true
