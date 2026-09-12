@@ -20,9 +20,8 @@ engine:
   repository: Claude-Skills
   remote_name: origin
   working_branch: pmo-framework
-  # verified: false is intentional for this implementation task. A real
-  # Engine push is blocked while this is false, regardless of how every
-  # other check resolves. A separate, controlled remote-verification task
-  # will set this to true after confirming remote identity and branch
-  # existence - the guard itself must never mutate this value.
-  verified: false
+  # verified: true - set only after an explicit, controlled
+  # remote-verification task confirmed remote identity, reachability,
+  # branch existence/non-conflict, and clean framework history. The guard
+  # itself must never mutate this value.
+  verified: true
