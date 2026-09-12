@@ -1,0 +1,28 @@
+schema_version: "1.0"
+
+# PMO Engine framework repository routing - Domain A only.
+#
+# This file governs Git operations against the PMO Engine repository itself
+# (the reusable SDLC automation framework: .claude/hooks, .claude/lib,
+# .claude/scripts, .claude/skills, .claude/settings.json). It is read ONLY
+# by the Engine-domain path in .claude/hooks/repo-binding-guard.py.
+#
+# It MUST NEVER contain Smart Basket / project-artifact routing - that is
+# owned exclusively by .pmo/project-config.yaml, which this file must never
+# reference or duplicate. The two configs are deliberately independent and
+# must never control one another.
+#
+# No secrets, tokens, or credentials belong here or in any PMO config file.
+
+engine:
+  provider: github
+  workspace: zohaibtekrevol
+  repository: Claude-Skills
+  remote_name: origin
+  working_branch: pmo-framework
+  # verified: false is intentional for this implementation task. A real
+  # Engine push is blocked while this is false, regardless of how every
+  # other check resolves. A separate, controlled remote-verification task
+  # will set this to true after confirming remote identity and branch
+  # existence - the guard itself must never mutate this value.
+  verified: false

@@ -1,0 +1,29 @@
+# PMO Engine repository - framework-only tracking.
+#
+# This repository's canonical Git history holds the reusable PMO Engine
+# SDLC automation framework ONLY (.claude/hooks, .claude/lib,
+# .claude/scripts, .claude/skills, .claude/settings.json,
+# .claude/pmo-engine-config.yaml). Live project state - created per
+# project by the PMO skills/hooks, and published to that project's own
+# Project Artifact Repository via the managed workspace and Artifact
+# Publisher - must never be committed here, even by accident.
+#
+# These files are expected to exist LOCALLY on disk while working on a
+# project session; they are intentionally excluded from Engine tracking,
+# not deleted. A generic, framework-owned template/fixture, if ever
+# needed, belongs under templates/, fixtures/, or examples/ - never under
+# these paths.
+
+# Project-artifact state (per-project; never Engine source)
+.pmo/
+docs/pmo/
+
+# Generated / runtime content
+test/generated/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# OS noise
+.DS_Store
