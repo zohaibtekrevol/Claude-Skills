@@ -733,12 +733,111 @@ def latest_scope_version(root):
     return versions[-1] if versions else None
 
 
+# --------------------------------------------------------------------------- #
+# Specs Document Control parsing - format-tolerant (Phase 2C correction)
+# --------------------------------------------------------------------------- #
+#
+# docs/pmo/specs/specs.md's real Document Control is a BULLET LIST
+# (`- **Spec Version:** 0.1`), not a pipe table - unlike Scope's and the CR
+# record's Document Control, which genuinely are tables. The authoritative,
+# already-proven parser for this exact format is `specs-governance-guard.py`'s
+# `_field()` - format-tolerant across plain `Label: value`, `**Label:**
+# value`, and `| Label | value |`. That guard's own 50/50 regression suite
+# already validates it against this precise file.
+#
+# `_flex_field` below is that SAME algorithm, ported (not imported - a
+# `.claude/lib/` module must not depend on a `.claude/hooks/` guard; libs are
+# the dependency target, not the dependent, exactly as `artifact_publish_core.py`
+# is depended on by, and never depends on, its guard/CLI) so this core reads
+# Specs metadata identically to the guard that already governs it, rather
+# than maintaining a second, narrower interpretation. Scope/CR/Feedback/
+# Change-Log parsing is untouched - those artifacts are genuinely
+# table-structured and the existing `field_map_from_table`/`first_table`
+# helpers remain correct and unchanged for them.
+
+def _flex_field(text, label):
+    """First `Label: value` (or `**Label:** value`, `| Label | value |`) in
+    text. Verbatim port of specs-governance-guard.py's `_field()` - do not
+    let this drift from that implementation without a corresponding review
+    of both."""
+    core_pat = r"[ \t]+".join(re.escape(p) for p in label.split())
+    pattern = re.compile(
+        r"^[ \t>*\-+|]*\**[ \t]*" + core_pat
+        + r"[ \t]*\**[ \t]*[:|][ \t]*\**[ \t]*(.+?)[ \t]*\**[ \t]*\|?[ \t]*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    m = pattern.search(text or "")
+    if not m:
+        return None
+    value = m.group(1).strip().strip("*").strip().strip("`").strip()
+    return value or None
+
+
+def _flex_field_all_values(text, label):
+    """Every DISTINCT value matched for `label` by the same tolerant pattern
+    as `_flex_field` - used only to detect genuine ambiguity (two different
+    declared values for the one field), never to choose among them. A
+    field mentioned only in ordinary prose (no ':'/'|' immediately after the
+    label) never matches this pattern, so incidental mentions elsewhere in
+    the document (e.g. "introduced in Spec Version 0.1 from Scope v0.1")
+    are not mistaken for a second Document Control declaration."""
+    core_pat = r"[ \t]+".join(re.escape(p) for p in label.split())
+    pattern = re.compile(
+        r"^[ \t>*\-+|]*\**[ \t]*" + core_pat
+        + r"[ \t]*\**[ \t]*[:|][ \t]*\**[ \t]*(.+?)[ \t]*\**[ \t]*\|?[ \t]*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    values = []
+    for m in pattern.finditer(text or ""):
+        v = m.group(1).strip().strip("*").strip().strip("`").strip()
+        if v and v not in values:
+            values.append(v)
+    return values
+
+
+SPECS_DOCUMENT_CONTROL_LABELS = (
+    "Project", "Client", "Project ID", "Project Name", "Spec Version",
+    "Spec Status", "Status", "Intent Version", "Scope Version",
+    "Generated From", "Last Updated", "Execution Authorized", "Repository",
+)
+
+
+def parse_specs_document_control(content):
+    """Every Document Control field docs/pmo/specs/specs.md may declare,
+    tolerant of the real bullet-list format (and the table/plain forms).
+    Mirrors specs-governance-guard.py's `parse_spec_metadata()` field list
+    and its Project-Name/Status fallbacks exactly - same authoritative
+    shape, not a reinvented one. Keys are lower-cased field names."""
+    meta = {}
+    for label in SPECS_DOCUMENT_CONTROL_LABELS:
+        v = _flex_field(content, label)
+        if v is not None:
+            meta[label.lower()] = v
+    if "project" not in meta and "project name" in meta:
+        meta["project"] = meta["project name"]
+    if "spec status" not in meta and "status" in meta:
+        meta["spec status"] = meta["status"]
+    return meta
+
+
+def parse_specs_version_value(content):
+    """The document's Spec Version as a clean 'X.Y' string, or None if
+    absent OR genuinely ambiguous (more than one distinct declared value
+    found) - fail closed rather than silently picking one."""
+    values = _flex_field_all_values(content, "Spec Version")
+    if len(values) != 1:
+        return None
+    m = re.match(r"^\s*[vV]?(\d+)\.(\d+)", values[0])
+    if not m:
+        return None
+    return "{}.{}".format(int(m.group(1)), int(m.group(2)))
+
+
 def read_specs_spec_version(root):
     content = read_text(os.path.join(root, *SPECS_POSIX.split("/")))
     if content is None:
         return None, None
-    fields = field_map_from_table(*first_table(content))
-    return fields.get("Spec Version"), content
+    return parse_specs_version_value(content), content
 
 
 def read_cr_fields(root, cr_id):
@@ -760,8 +859,18 @@ def find_changelog_row_for_cr(content, cr_id):
 
 
 def content_has_change_source(content, cr_id):
-    return bool(re.search(r"Change Source:\s*" + re.escape(cr_id) + r"(\D|$)",
-                          content or ""))
+    """Detect a 'Change Source' reference to cr_id regardless of surrounding
+    markdown decoration - plain 'Change Source: CR-NNN', bold
+    '**Change Source:** CR-NNN' (the real per-requirement format
+    specs-governance-guard.py already accepts, e.g. Smart Basket's
+    '- **Change Source:** INITIAL_SCOPE' convention), or a table cell
+    '| Change Source | CR-NNN |'. The `\**` runs tolerate bold markers on
+    either side of the colon/pipe separator; deliberately still a presence
+    SEARCH (Change Source appears once per requirement, not once per
+    document, unlike Spec Version) rather than a single-field extraction."""
+    pattern = (r"Change Source[ \t]*\**[ \t]*[:|][ \t]*\**[ \t]*"
+              + re.escape(cr_id) + r"(\D|$)")
+    return bool(re.search(pattern, content or "", re.MULTILINE))
 
 
 # --------------------------------------------------------------------------- #
@@ -1314,10 +1423,8 @@ def validate_specs_write(tool_name, tool_input, root, state, marker_data, marker
             "specs.md update does not carry a 'Change Source: {}' "
             "tag.".format(cr_id),
         )
-    old_fields = field_map_from_table(*first_table(existing)) if existing else {}
-    new_fields = field_map_from_table(*first_table(new_content))
-    old_ver = old_fields.get("Spec Version", "")
-    new_ver = new_fields.get("Spec Version", "")
+    old_ver = (parse_specs_version_value(existing) or "") if existing else ""
+    new_ver = parse_specs_version_value(new_content) or ""
     target = marker_data.get("target_specs_version")
     baseline = marker_data.get("baseline_specs_version") or old_ver
     if target:
@@ -1594,11 +1701,11 @@ def run_begin_preconditions(root, cr_id, project_id_hint=None):
         return deny("PMO-CR-INTEGRATE-006",
                     "canonical specs.md does not exist at "
                     "docs/pmo/specs/specs.md."), None
-    specs_fields = field_map_from_table(*first_table(specs_content))
-    baseline_specs_version = specs_fields.get("Spec Version", "").strip()
+    baseline_specs_version = parse_specs_version_value(specs_content) or ""
     if not baseline_specs_version:
         return deny("PMO-CR-INTEGRATE-006",
-                    "specs.md has no identifiable Spec Version."), None
+                    "specs.md has no identifiable (or is an ambiguous) "
+                    "Spec Version."), None
     baseline_specs_hash = sha256_of_file(specs_path)
 
     if feedback_marker_is_open(root):
@@ -1797,8 +1904,7 @@ def reconcile_transaction(root, marker_data):
     specs_content = read_text(specs_path)
     if specs_content is None:
         return deny("PMO-CR-INTEGRATE-006", "canonical specs.md is missing."), report
-    specs_fields = field_map_from_table(*first_table(specs_content))
-    current_spec_version = specs_fields.get("Spec Version", "").strip()
+    current_spec_version = parse_specs_version_value(specs_content) or ""
     if current_spec_version not in (marker_data.get("baseline_specs_version"),
                                     marker_data.get("target_specs_version")):
         return deny("PMO-CR-INTEGRATE-011",

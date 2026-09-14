@@ -172,6 +172,34 @@ def specs_doc(spec_version, cr_id=None):
     return "\n".join(lines)
 
 
+def specs_doc_bulletlist(spec_version, cr_id=None, spec_status="PROVISIONAL",
+                         execution_authorized="false"):
+    """Synthetic Document Control in the bullet-list shape actually used by
+    the real Smart Basket project's docs/pmo/specs/specs.md (as opposed to
+    `specs_doc()` above, which is the pipe-table shape). Never built from
+    real project content - shape only, mirrored from the real Document
+    Control field set."""
+    lines = [
+        "# Specs", "",
+        "## 1. Document Control", "",
+        "- **Project:** Smart Basket",
+        "- **Client:** Smart Basket / eBasket KSA",
+        "- **Project ID:** SMART-BASKET",
+        "- **Spec Version:** {}".format(spec_version),
+        "- **Spec Status:** {}".format(spec_status),
+        "- **Generated From:** docs/pmo/scope/scope-v0.1.md",
+        "- **Execution Authorized:** {}".format(execution_authorized),
+        "",
+        "Some requirement was introduced in Spec Version {} from Scope "
+        "v0.1 - incidental prose mention, not a second Document Control "
+        "declaration.".format(spec_version),
+        "",
+    ]
+    if cr_id:
+        lines.append("- **Change Source:** {} (CHG-001)".format(cr_id))
+    return "\n".join(lines)
+
+
 def changelog_doc(rows=None):
     header = [
         "# Change Log", "",
@@ -914,6 +942,146 @@ def test_extra_no_git_calls_in_source():
 
 
 # --------------------------------------------------------------------------- #
+# 39-44: Specs baseline compatibility - bullet-list Document Control format
+# (matches the real Smart Basket docs/pmo/specs/specs.md shape) alongside
+# the pre-existing pipe-table format, per the format-tolerant parsing added
+# to change_request_incorporation_core.py's Specs reader.
+# --------------------------------------------------------------------------- #
+
+def test_39_specs_bulletlist_document_control_parses():
+    # A. bullet-list Specs Document Control parses correctly.
+    content = specs_doc_bulletlist("0.1")
+    check("39/bulletlist_spec_version",
+          core.parse_specs_version_value(content) == "0.1", content)
+    meta = core.parse_specs_document_control(content)
+    check("39/bulletlist_spec_status",
+          meta.get("spec status") == "PROVISIONAL", meta)
+    check("39/bulletlist_execution_authorized",
+          meta.get("execution authorized") == "false", meta)
+    check("39/bulletlist_generated_from",
+          meta.get("generated from") == "docs/pmo/scope/scope-v0.1.md", meta)
+    check("39/bulletlist_change_source_absent_when_none",
+          core.content_has_change_source(content, "CR-999") is False, content)
+    content_with_source = specs_doc_bulletlist("0.1", cr_id="CR-039")
+    check("39/bulletlist_change_source_present",
+          core.content_has_change_source(content_with_source, "CR-039"), content_with_source)
+
+
+def test_40_specs_table_format_still_parses():
+    # B. Pre-existing pipe-table Specs format continues to parse correctly
+    # (no regression from adding bullet-list support).
+    content = specs_doc("0.1")
+    check("40/table_spec_version",
+          core.parse_specs_version_value(content) == "0.1", content)
+    content_with_source = specs_doc("0.2", cr_id="CR-040")
+    check("40/table_change_source_present",
+          core.content_has_change_source(content_with_source, "CR-040"), content_with_source)
+    check("40/table_change_source_absent_when_none",
+          core.content_has_change_source(content, "CR-999") is False, content)
+
+
+def test_41_specs_malformed_version_fails_closed():
+    # C. A malformed (non-numeric) Spec Version value must fail closed
+    # (None), in both supported formats.
+    bullet = specs_doc_bulletlist("not-a-version")
+    check("41/malformed_version_bulletlist_none",
+          core.parse_specs_version_value(bullet) is None, bullet)
+    table = "\n".join(["# Specs", "", "| Field | Value |", "|---|---|",
+                       "| Spec Version | not-a-version |", ""])
+    check("41/malformed_version_table_none",
+          core.parse_specs_version_value(table) is None, table)
+
+
+def test_42_specs_ambiguous_version_fails_closed():
+    # D. Two conflicting Spec Version declarations in the same document
+    # must fail closed (None) rather than silently pick one.
+    content = specs_doc_bulletlist("0.1") + "\n- **Spec Version:** 0.2\n"
+    check("42/ambiguous_version_none",
+          core.parse_specs_version_value(content) is None, content)
+    # A single value repeated identically is NOT ambiguous - same value,
+    # not a conflict - so it should still parse.
+    content_same = specs_doc_bulletlist("0.1") + "\n- **Spec Version:** 0.1\n"
+    check("42/repeated_identical_value_still_parses",
+          core.parse_specs_version_value(content_same) == "0.1", content_same)
+
+
+def test_43_specs_missing_version_fails_closed():
+    # E. Missing required Spec Version metadata must fail closed (None) at
+    # the parser level, and PMO-CR-INTEGRATE-006 at the BEGIN-precondition
+    # level (not a false pass, and not misattributed to a different code).
+    content = "\n".join([
+        "# Specs", "", "## 1. Document Control", "",
+        "- **Project:** Smart Basket",
+        "- **Spec Status:** PROVISIONAL", "",
+    ])
+    check("43/missing_version_none",
+          core.parse_specs_version_value(content) is None, content)
+
+    tmp = new_tmp("t43")
+    try:
+        make_project(tmp, cr_id="CR-043")
+        _w(os.path.join(tmp, "docs", "pmo", "specs", "specs.md"), content)
+        decision, plan = core.run_begin_preconditions(tmp, "CR-043")
+        check("43/begin_preconditions_INTEGRATE_006",
+              decision is not None and decision.code == "PMO-CR-INTEGRATE-006"
+              and plan is None, decision)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_44_specs_bulletlist_end_to_end_version_progression():
+    # F. Canonical version-progression rules remain fully enforced when
+    # specs.md is in the real bullet-list shape, both for the happy path
+    # (baseline -> target across a full BEGIN/VALIDATE/FINALIZE cycle) and
+    # for drift detection (test_19's scenario, replayed against bullet-list
+    # content instead of table content).
+    tmp = new_tmp("t44")
+    try:
+        make_project(tmp, cr_id="CR-044")
+        _w(os.path.join(tmp, "docs", "pmo", "specs", "specs.md"), specs_doc_bulletlist("0.1"))
+        b = cli.run("begin", root=tmp, cr_id="CR-044")
+        check("44/begin_ok_with_bulletlist_baseline", b["status"] == "ACTIVE", b)
+        plan = b["plan"]
+        check("44/baseline_specs_version_read_as_0.1",
+              plan["current_specs_version"] == "0.1", plan)
+
+        _w(os.path.join(tmp, *plan["target_scope_path"].split("/")),
+          scope_doc(plan["target_scope_version"], plan["current_scope_version"], "CR-044"))
+        _w(os.path.join(tmp, *plan["baseline_specs_path"].split("/")),
+          specs_doc_bulletlist(plan["target_specs_version"], "CR-044"))
+        _w(os.path.join(tmp, *plan["change_log_path"].split("/")),
+          changelog_doc([chg_row(plan["target_change_log_id"], "CR-044",
+                                 plan["target_scope_version"], plan["target_specs_version"])]))
+        v = cli.run("validate", root=tmp, cr_id="CR-044")
+        check("44/validate_ok_with_bulletlist_target", v["status"] == "PASS", v)
+        f = cli.run("finalize", root=tmp, cr_id="CR-044")
+        check("44/finalize_incorporated", f["status"] == "INCORPORATED", f)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # Drift variant: target specs.md (bullet-list) carries neither the
+    # baseline nor the target version - must still be caught.
+    tmp2 = new_tmp("t44b")
+    try:
+        make_project(tmp2, cr_id="CR-045")
+        _w(os.path.join(tmp2, "docs", "pmo", "specs", "specs.md"), specs_doc_bulletlist("0.1"))
+        b = cli.run("begin", root=tmp2, cr_id="CR-045")
+        plan = b["plan"]
+        _w(os.path.join(tmp2, *plan["target_scope_path"].split("/")),
+          scope_doc(plan["target_scope_version"], plan["current_scope_version"], "CR-045"))
+        _w(os.path.join(tmp2, *plan["baseline_specs_path"].split("/")),
+          specs_doc_bulletlist("9.9"))  # neither baseline (0.1) nor target (0.2)
+        _w(os.path.join(tmp2, *plan["change_log_path"].split("/")),
+          changelog_doc([chg_row(plan["target_change_log_id"], "CR-045",
+                                 plan["target_scope_version"], plan["target_specs_version"])]))
+        r = cli.run("validate", root=tmp2, cr_id="CR-045")
+        check("44/bulletlist_specs_drift_caught__RECOVERY_011",
+              r["status"] == "RECOVERY_REQUIRED" and r["decision"]["code"] == "PMO-CR-INTEGRATE-011", r)
+    finally:
+        shutil.rmtree(tmp2, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------- #
 
 def main():
     for fn in (
@@ -948,6 +1116,12 @@ def main():
         test_36_wrong_project_marker_blocked,
         test_37_marker_transaction_id_changed_mid_run_blocked,
         test_38_unexpected_exception_fail_closed,
+        test_39_specs_bulletlist_document_control_parses,
+        test_40_specs_table_format_still_parses,
+        test_41_specs_malformed_version_fails_closed,
+        test_42_specs_ambiguous_version_fails_closed,
+        test_43_specs_missing_version_fails_closed,
+        test_44_specs_bulletlist_end_to_end_version_progression,
         test_extra_status_no_transaction,
         test_extra_status_different_cr_active,
         test_extra_dry_run_never_touches_disk,
