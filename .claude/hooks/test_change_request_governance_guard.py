@@ -21,6 +21,15 @@ _spec = importlib.util.spec_from_file_location("change_request_governance_guard"
 mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(mod)
 
+# Phase 2C: the guard is now a thin shim over the shared core - pure-logic
+# unit checks (transition tables, regexes, etc.) exercise the core module
+# directly, since the guard only re-exports the names process_write_edit
+# itself needs, not the full core surface.
+CORE = os.path.join(HERE, "..", "lib", "change_request_incorporation_core.py")
+_core_spec = importlib.util.spec_from_file_location("change_request_incorporation_core", CORE)
+core = importlib.util.module_from_spec(_core_spec)
+_core_spec.loader.exec_module(core)
+
 _RESULTS = []
 
 
@@ -66,9 +75,15 @@ MARKER_RELPATH = os.path.join(".pmo", "change-request-transaction.json")
 FEEDBACK_MARKER_RELPATH = os.path.join(".pmo", "feedback-transaction.json")
 
 
+_HASH_PLACEHOLDER = "0" * 64
+
+
 def marker_json(project_id="SMART-BASKET", cr_id=None, operation="STATE_TRANSITION",
                 status="ACTIVE", transaction_id="CRTX-TEST-0001",
-                started_at="2026-09-14T20:00:00Z", **extra):
+                started_at="2026-09-14T20:00:00Z",
+                baseline_scope_version="0.1", target_scope_version="0.2",
+                baseline_specs_version="0.1", target_specs_version="0.2",
+                target_change_log_id="CHG-001", **extra):
     d = {
         "transaction_type": "CHANGE_REQUEST_MANAGEMENT",
         "transaction_id": transaction_id,
@@ -78,6 +93,18 @@ def marker_json(project_id="SMART-BASKET", cr_id=None, operation="STATE_TRANSITI
         "started_at": started_at,
         "status": status,
     }
+    if operation == "INCORPORATION":
+        d.update({
+            "baseline_scope_version": baseline_scope_version,
+            "baseline_scope_path": "docs/pmo/scope/scope-v{}.md".format(baseline_scope_version),
+            "baseline_scope_hash": _HASH_PLACEHOLDER,
+            "baseline_specs_version": baseline_specs_version,
+            "baseline_specs_path": "docs/pmo/specs/specs.md",
+            "baseline_specs_hash": _HASH_PLACEHOLDER,
+            "target_scope_version": target_scope_version,
+            "target_specs_version": target_specs_version,
+            "target_change_log_id": target_change_log_id,
+        })
     d.update(extra)
     return json.dumps(d)
 
@@ -247,14 +274,14 @@ def run(tool, tool_input, files=None, cr_marker=None, feedback_marker=None,
 # --------------------------------------------------------------------------- #
 
 def test_units():
-    check("unit/transitions_draft", mod.TRANSITIONS["DRAFT"] == {"PM_REVIEW", "CANCELLED"})
-    check("unit/transitions_incorporated_terminal", mod.TRANSITIONS["INCORPORATED"] == set())
-    check("unit/pm_proposed_literal", mod.PM_PROPOSED_LITERAL == "No Feedback ID — PM_PROPOSED")
+    check("unit/transitions_draft", core.TRANSITIONS["DRAFT"] == {"PM_REVIEW", "CANCELLED"})
+    check("unit/transitions_incorporated_terminal", core.TRANSITIONS["INCORPORATED"] == set())
+    check("unit/pm_proposed_literal", core.PM_PROPOSED_LITERAL == "No Feedback ID — PM_PROPOSED")
     check("unit/change_source_match",
-          mod.content_has_change_source("blah Change Source: CR-005 (CHG-002) blah", "CR-005"))
+          core.content_has_change_source("blah Change Source: CR-005 (CHG-002) blah", "CR-005"))
     check("unit/change_source_no_partial_match",
-          not mod.content_has_change_source("Change Source: CR-0051", "CR-005"))
-    check("unit/cr_id_re", bool(mod.CR_ID_RE.match("CR-030")) and not mod.CR_ID_RE.match("CR"))
+          not core.content_has_change_source("Change Source: CR-0051", "CR-005"))
+    check("unit/cr_id_re", bool(core.CR_ID_RE.match("CR-030")) and not core.CR_ID_RE.match("CR"))
 
 
 # --------------------------------------------------------------------------- #
@@ -573,7 +600,8 @@ def test_19_change_log_version_mismatch_denied():
                 "docs/pmo/scope/scope-v0.2.md": scope_doc("0.2", "0.1", "CR-118"),
                 "docs/pmo/specs/specs.md": specs_doc("0.2", "CR-118"),
             },
-            cr_marker={"cr_id": "CR-118", "operation": "INCORPORATION"})
+            cr_marker={"cr_id": "CR-118", "operation": "INCORPORATION",
+                      "target_change_log_id": "CHG-004"})
     check("19/change_log_version_mismatch__DENY_015", code(d) == "PMO-CR-GUARD-015", code(d))
 
 

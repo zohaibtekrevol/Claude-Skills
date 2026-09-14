@@ -14,17 +14,27 @@ description: >-
   from conversation history), never renumbers or reuses one — including after
   REJECTED/CANCELLED, where a later reconsideration becomes a new CR with a
   Related Prior CR back-reference — and preserves append-only lifecycle
-  history so a later cancellation never erases a prior approval. It defines,
-  as a contract only (no guard, no incorporation code, built in a later
-  phase), the single governed transaction an APPROVED CR must pass through to
-  reach INCORPORATED: a new immutable Scope version, an in-place specs.md
-  update (never specs-v0.2.md), and exactly one new Change Log (CHG-NNN)
-  entry, all three or none — INCORPORATED is never reported on a partial
-  transaction. Never performs incorporation itself in this phase, never
-  writes Scope/specs.md/Change Log production records, never commits or
-  pushes. PMO-CR-001 … PMO-CR-023 define deterministic halt behaviour, in a
-  namespace disjoint from PMO-FEEDBACK-*, PMO-FEEDBACK-GUARD-*, PMO-SCOPE-*,
-  PMO-SPEC-*, and PMO-PUBLISH-*.
+  history so a later cancellation never erases a prior approval. It owns the
+  single governed transaction an APPROVED CR must pass through to reach
+  INCORPORATED — a new immutable Scope version, an in-place specs.md update
+  (never specs-v0.2.md), and exactly one new Change Log (CHG-NNN) entry, all
+  three or none — but this Skill itself never authors that content or
+  executes the transaction: it always performs the actual Scope/Specs/
+  Change Log edits as ordinary, guard-governed Write/Edit calls, and hands
+  transaction execution/reconciliation to the deterministic orchestrator
+  .claude/scripts/change-request-incorporator.py (begin / status / validate
+  / finalize), sharing one implementation,
+  .claude/lib/change_request_incorporation_core.py, with
+  change-request-governance-guard.py so the two can never disagree.
+  INCORPORATED is never reported on a partial transaction; a genuine
+  inconsistency moves the transaction marker to RECOVERY_REQUIRED rather
+  than silently rolling back or falsely succeeding. Never writes
+  Scope/specs.md/Change Log outside that governed transaction, never commits
+  or pushes. PMO-CR-001 … PMO-CR-023 (Skill-level), PMO-CR-GUARD-001 …
+  PMO-CR-GUARD-026 (guard), and PMO-CR-INTEGRATE-001 … PMO-CR-INTEGRATE-025
+  (orchestrator) define deterministic halt behaviour, in namespaces disjoint
+  from each other and from PMO-FEEDBACK-*, PMO-FEEDBACK-GUARD-*,
+  PMO-SCOPE-*, PMO-SPEC-*, and PMO-PUBLISH-*.
 ---
 
 # Change Request Management (PMO)
@@ -496,12 +506,62 @@ leave the CR at `APPROVED` — never a partial state.
 
 ---
 
-## 19. Incorporation transaction — contract only (not implemented this phase)
+## 19. Incorporation transaction — orchestrated by change-request-incorporator.py
 
-This section defines the **complete transaction contract**. Its enforcement
-(a `change-request-governance-guard.py`) and its execution code are **out of
-scope for this task** — building them is future work. What follows is the
-binding specification that future work must satisfy.
+This section defines the **complete transaction contract**. As of Phase 2C
+it is implemented, not merely specified: `change-request-governance-guard.py`
+enforces it on every Claude Write/Edit, and
+`.claude/scripts/change-request-incorporator.py` — the deterministic
+orchestrator — executes and reconciles the transaction end to end. Both
+share one implementation, `.claude/lib/change_request_incorporation_core.py`,
+so "the guard says PASS but the orchestrator says FAIL" for the same
+on-disk state cannot happen by construction.
+
+**Ownership boundary, restated precisely because it is the one rule
+everything else here serves:** this Skill (the semantic layer) decides
+*what* an incorporation contains — the new Scope requirement's wording, the
+updated Spec behaviour, which modules/requirements are affected, the Change
+Log's change summary. The orchestrator decides *whether the transaction may
+proceed and whether it actually succeeded* — it never authors requirement
+text, Scope/Spec interpretation, acceptance criteria, affected modules, or
+business rules. Concretely: this Skill always performs the actual
+Scope/Specs/Change Log edits itself, as ordinary Write/Edit calls governed
+exactly as they always have been; the orchestrator only runs before (BEGIN)
+and after (VALIDATE / FINALIZE) that work.
+
+**The four-command interface** (`.claude/scripts/change-request-incorporator.py`):
+
+| Command | When | Does |
+|---|---|---|
+| `begin --cr CR-NNN [--dry-run]` | **Before the first Scope/Specs/Change Log write** | Runs the full BEGIN precondition checklist (Section 18) read-only; on PASS (and not `--dry-run`), writes `.pmo/change-request-transaction.json` with the computed target versions/ids. `--dry-run` reports the same eligibility/targets and never touches disk — this is the preflight/dry-run mode. |
+| `status [--cr CR-NNN]` | Any time | Pure read-only inspection of the current transaction, if any — never mutates anything. |
+| `validate --cr CR-NNN` | **After this Skill has performed the governed Scope/Specs/Change Log edits** | Re-reads everything from disk and re-runs full reconciliation (Section 24, "Final Reconciliation"). PASS means ready for `finalize`; a genuine inconsistency moves the marker to `RECOVERY_REQUIRED` and reports exactly what is missing/wrong. |
+| `finalize --cr CR-NNN` | **Only after `validate` reports PASS** | Re-validates from scratch (never trusts a stale prior `validate`) and, only on a full PASS, performs the CR's `APPROVED → INCORPORATED` write with an appended history row, then removes the marker as the last step. |
+
+This is the concrete realisation of the flow this section already specified:
+
+```
+change-request-incorporator.py begin --cr CR-007
+    ↓
+transaction marker created
+
+Semantic Skill performs governed Scope/Specs/Change Log edits
+    ↓
+change-request-incorporator.py validate --cr CR-007
+    ↓
+reconciliation PASS
+
+change-request-incorporator.py finalize --cr CR-007
+    ↓
+CR → INCORPORATED
+marker removed
+```
+
+**Publication remains entirely separate** — the orchestrator never runs
+`git add` / `git commit` / `git push`, creates or switches a branch, or
+selects a remote (Section 28 is unchanged by this implementation).
+`artifact-publish` remains the only Skill authorised to publish the
+resulting project-artifact changes, run as its own later, explicit step.
 
 Required outcome, as **one logical governed transaction**:
 
@@ -641,50 +701,63 @@ and `specs.md` — exactly the same detect-don't-auto-repair pattern
 
 ---
 
-## 25. CR transaction marker — contract for a future guard (not created now)
+## 25. CR transaction marker — implemented (Phase 2C)
 
 Parallel to `feedback-management`'s `.pmo/feedback-transaction.json`
-(Phase 1D), this Skill will eventually own an equivalent marker for the
-incorporation transaction:
+(Phase 1D). As of Phase 2C this marker, its schema, and its enforcement are
+fully implemented — not a future contract.
 
 **Path:** `.pmo/change-request-transaction.json`
 
-**Schema:**
+**Schema** (`operation: "INCORPORATION"` — see
+`change_request_incorporation_core.py` for the full field set, including
+the smaller schema used by this CR's other lifecycle operations, Section 11):
 
 ```json
 {
-  "transaction_type": "CHANGE_REQUEST_INCORPORATION",
+  "transaction_type": "CHANGE_REQUEST_MANAGEMENT",
   "transaction_id": "<opaque, unique per run>",
   "project_id": "<must equal .pmo/project-config.yaml project.id>",
   "cr_id": "CR-NNN",
+  "operation": "INCORPORATION",
   "started_at": "<ISO 8601 UTC, set once, never rewritten>",
   "status": "ACTIVE",
   "baseline_scope_version": "<e.g. 0.1>",
+  "baseline_scope_path": "docs/pmo/scope/scope-v0.1.md",
   "baseline_scope_hash": "<sha256 of the current latest scope-vX.Y.md at start>",
   "baseline_specs_version": "<e.g. 0.1>",
-  "baseline_specs_hash": "<sha256 of specs.md at start>"
+  "baseline_specs_path": "docs/pmo/specs/specs.md",
+  "baseline_specs_hash": "<sha256 of specs.md at start>",
+  "target_scope_version": "<deterministically computed - baseline minor + 1>",
+  "target_specs_version": "<deterministically computed>",
+  "target_change_log_id": "<next free CHG-NNN>",
+  "cr_path": "docs/pmo/cr/CR-NNN.md",
+  "change_log_path": "docs/pmo/change-log/change-log.md",
+  "project_config_hash": "<sha256 of project-config.yaml at start>",
+  "approval_evidence_reference": "<the CR's own Approval Evidence value>",
+  "intent_hash": "<combined sha256 over docs/pmo/intent/ at start>",
+  "feedback_hash": "<combined sha256 over docs/pmo/feedback/ at start, CLIENT_REQUESTED only, else null>"
 }
 ```
 
-Ownership mirrors Section 26/32 of `feedback-management/SKILL.md` exactly:
-**this Skill** will own creating it (immediately before Section 19 step 1),
-transitioning/removing it, and **the future `change-request-governance-
-guard.py`** will read and validate it — deny any Scope/`specs.md`/Change Log
-write while no matching marker is open for that specific `cr_id`, deny a
-second, different `cr_id`'s marker from being created while one is already
-open (serializing incorporation — only one CR incorporates at a time), and
-deny any silent overwrite (same `transaction_id`/`started_at` immutability
-rule as the feedback marker). `baseline_scope_hash`/`baseline_specs_hash`
-give that future guard a deterministic way to detect exactly the "Scope
-succeeded but Specs failed" class of partial transaction from Section 24
-without needing to re-derive it from file timestamps.
+`status` stays the same three-state model as the feedback marker: `ACTIVE`
+/ `RECONCILING` / `RECOVERY_REQUIRED` — no additional states.
 
-**This phase does not implement or enforce any of this** — no guard is
-built, and no live marker is created by this task (Section 6/Prohibited
-Operations, Section 31). This section exists so the future guard has an
-unambiguous contract to implement against, exactly as this Skill's own CR
-contract was written (Phase 1A) before `feedback-management` existed to
-consume it.
+Ownership mirrors Section 26/32 of `feedback-management/SKILL.md`:
+`change-request-incorporator.py`'s `begin` command creates it (only after
+the full BEGIN precondition checklist passes, Section 18), `validate`/
+`finalize` transition its `status` (same-transaction, rule-respecting
+updates only — never a different `transaction_id`/`started_at`/`cr_id`/
+`operation`), and `finalize` removes it as the last step of a successful
+transaction. `change-request-governance-guard.py` reads and validates every
+write to it (and to the Scope/Specs/Change Log paths it gates) — both the
+guard and the CLI call the identical functions in
+`.claude/lib/change_request_incorporation_core.py`, so they cannot
+disagree on the same on-disk state. `intent_hash`/`feedback_hash` give
+`reconcile_transaction` a deterministic way to detect the one class of
+drift no Write/Edit-based guard can see on its own: something outside the
+Write/Edit tool chain altering Intent or feedback source evidence during
+the transaction.
 
 ---
 
@@ -752,31 +825,28 @@ all (no real CR is created or incorporated by this task).
 
 ---
 
-## 30. Known integration dependency — the currently-installed feedback guard
+## 30. Cross-guard integration — resolved (Phase 2B)
 
-Documented here for transparency, not worked around: `feedback-governance-
-guard.py` (installed and active, Phase 1C/1D) already governs **every**
-write to `docs/pmo/cr/CR-NNN.md` and `docs/pmo/cr/change-request-
-register.md`, unconditionally, regardless of which Skill or actor is
-writing — it has no notion of caller identity (documented in its own
-module docstring). Its current rule set only permits a CR-NNN.md write with
-`Origin: CLIENT_REQUESTED` and `Status` in `{DRAFT, CANCELLED}` — exactly
-the feedback-authorised subset it was built for.
+Previously documented here as a known blocking dependency: until
+`change-request-governance-guard.py` existed, `feedback-governance-
+guard.py` governed **every** write to `docs/pmo/cr/` unconditionally,
+permitting only the feedback-authorised subset (`Origin: CLIENT_REQUESTED`,
+`Status` in `{DRAFT, CANCELLED}`) — meaning this Skill could not yet
+operate end-to-end on a real CR.
 
-**Consequence:** until a `change-request-governance-guard.py` exists and the
-two guards' authority over `docs/pmo/cr/` is deliberately reconciled, any
-real attempt by this Skill to create a `PM_PROPOSED` CR, or to transition
-any CR to `PM_REVIEW` / `PENDING_CLIENT_DECISION` / `APPROVED` / `REJECTED`
-/ `DEFERRED` / `INCORPORATED`, would be **denied by the existing feedback
-guard** (`PMO-FEEDBACK-GUARD-014` for `PM_PROPOSED` origin, `PMO-FEEDBACK-
-GUARD-015` for any status beyond `DRAFT`/`CANCELLED`). This is expected and
-correct given the phased build-out (this task explicitly excludes building
-`change-request-governance-guard.py`), not a defect in either guard — but it
-means this Skill is **not yet operable end-to-end** on real CRs. That
-reconciliation (most likely: the future CR guard takes over `docs/pmo/cr/`
-authority entirely, and the feedback guard's CR-path rules are narrowed to
-defer to it, or are removed in favour of it) is explicitly future work, to
-be addressed when `change-request-governance-guard.py` is built.
+**This is now resolved.** `change-request-governance-guard.py` (Phase 2B)
+exists and is registered; domain routing between the two guards is
+content-based — a CR write whose resulting content is exactly the
+feedback-safe shape defers to `feedback-governance-guard.py` (unchanged,
+narrow authority), and every other shape (`PM_PROPOSED` origin, or any
+status beyond `DRAFT`/`CANCELLED`) is this Skill's guard's territory,
+requiring an open `.pmo/change-request-transaction.json`. The two
+transactions (`.pmo/feedback-transaction.json` and
+`.pmo/change-request-transaction.json`) are mutually exclusive — both
+guards independently detect and deny the both-active case
+(`PMO-FEEDBACK-GUARD-026` / `PMO-CR-GUARD-025`). This Skill is fully
+operable end-to-end on real CRs, including incorporation (Section 19,
+Phase 2C).
 
 ---
 
@@ -800,14 +870,13 @@ This Skill must never, in this phase or any future one:
   incorporation
 - mark a CR `INCORPORATED` on a partial transaction
 - write `docs/pmo/scope/`, `docs/pmo/specs/specs.md`, or `docs/pmo/change-
-  log/change-log.md` outside the Section 19 transaction (which is not
-  implemented in this phase — so, this phase, never at all)
+  log/change-log.md` outside the Section 19 transaction (this Skill's own
+  Write/Edit calls remain governed by `change-request-governance-guard.py`
+  exactly as always; only `change-request-incorporator.py`'s `finalize`
+  ever writes the CR's own `INCORPORATED` state directly, and only after
+  full reconciliation passes)
 - mutate `.pmo/project-config.yaml` outside the Section 29 whitelist
 - `git commit`, `git push`, branch, or publish
-- (this task specifically) create `change-request-governance-guard.py`,
-  implement the Section 19 transaction's execution code, process a real
-  Smart Basket CR, approve any real CR, or create a live
-  `.pmo/change-request-transaction.json`
 
 ---
 
@@ -873,13 +942,15 @@ Publish Eligibility:
 | Rejection recorded | `PMO CR REJECTED` | `REJECTED` | none — terminal |
 | Deferral recorded | `PMO CR DEFERRED` | `DEFERRED` | `PM_REVIEW` (on reactivation) |
 | Cancellation recorded | `PMO CR CANCELLED` | `CANCELLED` | none — terminal |
-| Section 18 preconditions all pass | `PMO CR READY FOR INCORPORATION` | `APPROVED` | incorporation transaction (Section 19 — not implemented this phase) |
-| Incorporation transaction completes (future phase only) | `PMO CR INCORPORATED` | `INCORPORATED` | none — terminal; Development/QA consume the updated `specs.md` |
-| Any refusal (`PMO-CR-*` fired) | `PMO CR OPERATION BLOCKED` | unchanged | fix the cited condition, then retry |
+| `change-request-incorporator.py begin` preconditions all pass | `PMO CR READY FOR INCORPORATION` | `APPROVED` | `change-request-incorporator.py validate` / `finalize` (Section 19) |
+| Incorporation transaction completes (`finalize` PASS) | `PMO CR INCORPORATED` | `INCORPORATED` | none — terminal; Development/QA consume the updated `specs.md` |
+| Any refusal (`PMO-CR-*` / `PMO-CR-GUARD-*` / `PMO-CR-INTEGRATE-*` fired) | `PMO CR OPERATION BLOCKED` | unchanged | fix the cited condition, then retry |
 
 `Scope Changed` / `Specs Changed` / `Change Log Changed` are `NO` for every
-result in this phase — none of this Skill's currently-implemented
-operations ever touches those files. `Publish Eligibility` is `NO` whenever
+result this Skill itself produces directly (its own lifecycle-transition
+writes never touch those files); a `PMO CR INCORPORATED` result reports
+`YES` for all three, since that is precisely what a successful incorporation
+transaction did. `Publish Eligibility` is `NO` whenever
 any `PMO-CR-*` condition fired during the operation, `YES` otherwise (a
 successful state update is publishable by `artifact-publish` as a project
 artifact change; that is a separate, later action this Skill never performs
