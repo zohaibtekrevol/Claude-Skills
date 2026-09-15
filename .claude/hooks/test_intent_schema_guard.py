@@ -81,9 +81,18 @@ def open_table(rows):
     return "### Items\n\n" + OPEN_HEADER + "\n" + "\n".join(rows)
 
 
+_CONSISTENT_ACCEPTANCE = (
+    "- **Decision:** APPROVED\n"
+    "- **Decision Date:** 2026-09-10\n"
+    "- **Approved By:** Muneeb\n"
+    "- **Approval Evidence:** `.pmo/approvals/intent-approval.yaml`"
+)
+
+
 def build_doc(status="DRAFT", project_id="SMART-BASKET",
               open_section="_No open items._", source_row=_GOOD_SOURCE_ROW,
-              next_stage="REQUIREMENT_GATHERING"):
+              next_stage="REQUIREMENT_GATHERING", acceptance=None,
+              intent_version="0.1"):
     dc = "\n".join([
         "| Field | Value |",
         "|---|---|",
@@ -91,12 +100,15 @@ def build_doc(status="DRAFT", project_id="SMART-BASKET",
         "| Project ID | {} |".format(project_id),
         "| Client | Smart Basket / eBasket KSA |",
         "| Date | 2026-09-10 |",
-        "| Intent Version | 0.1 |",
+        "| Intent Version | {} |".format(intent_version),
         "| Status | {} |".format(status),
         "| Repository | Bitbucket - unverified |",
         "| Source Count | 1 |",
         "| Next Stage | {} |".format(next_stage),
     ])
+    if acceptance is None:
+        acceptance = _CONSISTENT_ACCEPTANCE if status == "VALIDATED" \
+            else "Body of section 16. Acceptance."
     parts = ["# Intent: Smart Basket", "", dc, ""]
     for s in SECTIONS:
         parts.append("## " + s)
@@ -106,6 +118,8 @@ def build_doc(status="DRAFT", project_id="SMART-BASKET",
             parts.append("| Source ID | Reference | Type | Date | Authority | How used |")
             parts.append("|---|---|---|---|---|---|")
             parts.append(source_row)
+        elif s.startswith("16."):
+            parts.append(acceptance)
         else:
             parts.append("Body of section {}.".format(s))
         parts.append("")
@@ -426,6 +440,100 @@ def test_defect2_stage_aware():
 
 
 # --------------------------------------------------------------------------- #
+# PMO-INTENT-014 - Acceptance-section / approval-record consistency
+# --------------------------------------------------------------------------- #
+
+def test_pmo_intent_014_acceptance_consistency():
+    # (a) VALIDATED with a fully consistent Acceptance section - PASS.
+    d = run_process(
+        "Write",
+        {"content": build_doc(status="VALIDATED", open_section=open_table(
+            [orow("OPEN-001", "YES", rb="Scope Baseline")]))},
+        on_disk=build_doc(status="DRAFT"), approval=APPROVAL_OK)
+    check("pmo014/a_consistent_acceptance_pass", d is None,
+          "got {} / {}".format(code_of(d), getattr(d, "message", "")))
+
+    # (b) VALIDATED but Section 16 still says the original placeholder text
+    # (the exact real-world defect this rule exists to close) - DENY 014.
+    d = run_process(
+        "Write",
+        {"content": build_doc(status="VALIDATED",
+                              acceptance="Body of section 16. Acceptance.")},
+        on_disk=build_doc(status="DRAFT"), approval=APPROVAL_OK)
+    check("pmo014/b_stale_acceptance_denies_014",
+          code_of(d) == "PMO-INTENT-014", "got {}".format(code_of(d)))
+
+    # (c) VALIDATED with Acceptance present but Decision != APPROVED - DENY 014.
+    d = run_process(
+        "Write",
+        {"content": build_doc(status="VALIDATED", acceptance=(
+            "- **Decision:** PENDING\n"
+            "- **Decision Date:** 2026-09-10\n"
+            "- **Approved By:** Muneeb\n"
+            "- **Approval Evidence:** `.pmo/approvals/intent-approval.yaml`"
+        ))},
+        on_disk=build_doc(status="DRAFT"), approval=APPROVAL_OK)
+    check("pmo014/c_decision_not_approved_denies_014",
+          code_of(d) == "PMO-INTENT-014", "got {}".format(code_of(d)))
+
+    # (d) VALIDATED with Acceptance's Approved By not matching the approval
+    # record - DENY 014.
+    d = run_process(
+        "Write",
+        {"content": build_doc(status="VALIDATED", acceptance=(
+            "- **Decision:** APPROVED\n"
+            "- **Decision Date:** 2026-09-10\n"
+            "- **Approved By:** Someone Else\n"
+            "- **Approval Evidence:** `.pmo/approvals/intent-approval.yaml`"
+        ))},
+        on_disk=build_doc(status="DRAFT"), approval=APPROVAL_OK)
+    check("pmo014/d_approved_by_mismatch_denies_014",
+          code_of(d) == "PMO-INTENT-014", "got {}".format(code_of(d)))
+
+    # (e) Acceptance section itself is internally consistent, but the
+    # on-disk approval record is for a different Intent version - DENY 014.
+    # Exercised as a direct unit call (mirroring (h) below): the full
+    # Write-tool path would hit PMO-INTENT-011's own, earlier, version-match
+    # check first (a distinct, already-existing rule) - 014's OWN job is
+    # specifically the Section-16-text-vs-record consistency, so it is
+    # tested in isolation here via `record_override`, exactly as the
+    # orchestrator uses it to pre-validate a candidate before writing.
+    doc = build_doc(status="VALIDATED", intent_version="0.1")
+    mismatched_version_record = {
+        "decision": "APPROVED",
+        "approval_source": "PM_EXPLICIT",
+        "artifact": "docs/pmo/intent/intent.md",
+        "approved_by": "Muneeb",
+        "version": "0.2",
+    }
+    dd = mod.validate_acceptance_consistency(
+        doc, mod.parse_doc_control(doc), "/nonexistent-root",
+        record_override=mismatched_version_record)
+    check("pmo014/e_version_mismatch_denies_014",
+          code_of(dd) == "PMO-INTENT-014", "got {}".format(code_of(dd)))
+
+    # (f) DRAFT edits are entirely unaffected by PMO-INTENT-014 (it only
+    # applies at the VALIDATED transition).
+    d = run_process("Write", {"content": build_doc(status="DRAFT")})
+    check("pmo014/f_draft_unaffected", d is None, "got {}".format(code_of(d)))
+
+    # (g) PM_REVIEWED finalisation is also unaffected (014 is VALIDATED-only).
+    d = run_process("Write", {"content": build_doc(status="PM_REVIEWED")})
+    check("pmo014/g_pm_reviewed_unaffected", d is None,
+          "got {}".format(code_of(d)))
+
+    # (h) direct unit check: validate_acceptance_consistency reports the
+    # exact missing fields.
+    doc = build_doc(status="VALIDATED", acceptance="nothing here")
+    dd = mod.validate_acceptance_consistency(
+        doc, mod.parse_doc_control(doc), "/nonexistent-root")
+    check("pmo014/h_missing_fields_named",
+          code_of(dd) == "PMO-INTENT-014"
+          and "Decision" in dd.message and "Approved By" in dd.message,
+          "got {} / {}".format(code_of(dd), getattr(dd, "message", "")))
+
+
+# --------------------------------------------------------------------------- #
 # entry point
 # --------------------------------------------------------------------------- #
 
@@ -433,6 +541,7 @@ def main():
     test_existing_behaviour()
     test_defect1_parser()
     test_defect2_stage_aware()
+    test_pmo_intent_014_acceptance_consistency()
     total = len(_RESULTS)
     failed = [n for n, ok in _RESULTS if not ok]
     print("\n{}/{} passed".format(total - len(failed), total))
