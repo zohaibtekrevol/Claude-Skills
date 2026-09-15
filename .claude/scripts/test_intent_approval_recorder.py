@@ -558,6 +558,148 @@ def test_marker_no_silent_overwrite_and_no_cross_project_reuse():
 
 
 # --------------------------------------------------------------------------- #
+# Reconciliation of an EXISTING valid approval must never rewrite it -
+# not even a free-text field such as `notes`
+# --------------------------------------------------------------------------- #
+
+_EXISTING_EVIDENCE_TEXT = (
+    'schema_version: "1.0"\n'
+    '\n'
+    'decision: "APPROVED"\n'
+    'approval_source: "PM_EXPLICIT"\n'
+    'artifact: "docs/pmo/intent/intent.md"\n'
+    'version: "0.3"\n'
+    'approved_by: "Muhammad Faizan"\n'
+    'approved_at: "2026-09-16"\n'
+    'approval_statement: "Original statement text, verbatim, never to be '
+    'regenerated."\n'
+    '\n'
+    'notes: "Original hand-written notes explicitly naming OPEN-001 and '
+    'OPEN-002 as preserved pending items - a framework template must never '
+    'replace this wording."\n'
+)
+
+
+def test_reconciliation_preserves_existing_approval_evidence_exactly():
+    # Reproduces the real defect this task fixes: Status already VALIDATED,
+    # Section 16 still the stale pre-approval placeholder (the fixture's
+    # `build_intent` always renders that placeholder regardless of
+    # `status`), and a fully valid, already-existing approval record.
+    p = Project(status="VALIDATED", version="0.3")
+    try:
+        p._write(os.path.join(".pmo", "approvals", "intent-approval.yaml"),
+                 _EXISTING_EVIDENCE_TEXT)
+        before_hash = core.sha256_of_text(_EXISTING_EVIDENCE_TEXT)
+        pre_status = core._norm_status(
+            core.parse_doc_control(p.read_intent()).get("status"))
+        check("reconcile/pre_status_validated", pre_status == "VALIDATED")
+        pre_decision, _d, _b, _e = core._acceptance_fields(p.read_intent())
+        check("reconcile/pre_acceptance_stale", pre_decision == "PENDING")
+
+        b = cli.run("begin", p.root, approved_by="Muhammad Faizan",
+                    decision_date="2026-09-16")
+        check("reconcile/begin_active", b["status"] == "ACTIVE", b)
+        check("reconcile/mode_is_reconcile_existing",
+              b["plan"]["mode"] == "RECONCILE_EXISTING", b["plan"])
+        check("reconcile/candidate_approval_yaml_is_none",
+              b["plan"]["candidate_approval_yaml"] is None)
+
+        f = cli.run("finalize", p.root)
+        check("reconcile/finalize_validated", f["status"] == "VALIDATED", f)
+        check("reconcile/marker_removed", p.read_marker() is None)
+
+        # (1) the approval file was never written to.
+        after_text = p.read_approval()
+        check("reconcile/1_evidence_bytes_identical",
+              after_text == _EXISTING_EVIDENCE_TEXT)
+        # (2) hash byte-identical before/after.
+        check("reconcile/2_hash_identical",
+              core.sha256_of_text(after_text) == before_hash)
+        # (3) the free-text notes field specifically survived untouched.
+        check("reconcile/3_notes_preserved_exactly",
+              "explicitly naming OPEN-001 and OPEN-002" in after_text)
+        check("reconcile/3_statement_preserved_exactly",
+              "never to be regenerated" in after_text)
+
+        # (4) only the Intent artifact changed.
+        final_intent = p.read_intent()
+        meta = core.parse_doc_control(final_intent)
+        check("reconcile/4_status_validated",
+              core._norm_status(meta.get("status")) == "VALIDATED")
+        acc_decision, acc_date, acc_by, acc_evi = core._acceptance_fields(final_intent)
+        check("reconcile/4_acceptance_now_consistent",
+              acc_decision == "APPROVED" and acc_by == "Muhammad Faizan"
+              and acc_date == "2026-09-16")
+        original = build_intent(status="VALIDATED", version="0.3")
+        for s in SECTIONS[:-1]:
+            check("reconcile/4_section_preserved[{}]".format(s),
+                  core.section_body(original, s) == core.section_body(final_intent, s),
+                  s)
+    finally:
+        p.cleanup()
+
+
+def test_reconciliation_identity_mismatch_fails_closed():
+    """Supplying a different approver/date than the one already on record
+    for a valid existing approval must fail closed, not silently adopt the
+    record's identity nor silently record a second decision."""
+    p = Project(status="DRAFT", version="0.3")
+    try:
+        p._write(os.path.join(".pmo", "approvals", "intent-approval.yaml"),
+                 _EXISTING_EVIDENCE_TEXT)
+        r = cli.run("begin", p.root, approved_by="Someone Else",
+                   decision_date="2026-09-16")
+        check("reconcile_mismatch/by_mismatch_denied",
+              r["status"] == "BLOCKED"
+              and code_of(r) == "PMO-INTENT-APPROVAL-016", r)
+
+        r2 = cli.run("begin", p.root, approved_by="Muhammad Faizan",
+                    decision_date="2026-01-01")
+        check("reconcile_mismatch/date_mismatch_denied",
+              r2["status"] == "BLOCKED"
+              and code_of(r2) == "PMO-INTENT-APPROVAL-016", r2)
+
+        check("reconcile_mismatch/evidence_untouched",
+              p.read_approval() == _EXISTING_EVIDENCE_TEXT)
+        check("reconcile_mismatch/no_marker_left", p.read_marker() is None)
+    finally:
+        p.cleanup()
+
+
+def test_fully_consistent_idempotent_zero_writes():
+    """Strengthened idempotency: for an already fully consistent VALIDATED
+    Intent + matching valid approval, a rerun performs ZERO writes -
+    verified via file mtimes, not just content equality."""
+    p = Project(status="DRAFT", version="0.3")
+    try:
+        cli.run("begin", p.root, approved_by="Muhammad Faizan",
+               decision_date="2026-09-16")
+        cli.run("finalize", p.root)
+
+        intent_mtime_before = os.stat(p.intent_path).st_mtime_ns
+        approval_mtime_before = os.stat(p.approval_path()).st_mtime_ns
+        intent_hash_before = core.sha256_of_file(p.intent_path)
+        approval_hash_before = core.sha256_of_file(p.approval_path())
+
+        r = cli.run("begin", p.root, approved_by="Muhammad Faizan",
+                   decision_date="2026-09-16")
+        check("zero_write/reports_no_change",
+              r["status"] == "NO_CHANGE"
+              and code_of(r) == "PMO-INTENT-APPROVAL-003", r)
+        check("zero_write/no_marker", p.read_marker() is None)
+        check("zero_write/intent_mtime_unchanged",
+              os.stat(p.intent_path).st_mtime_ns == intent_mtime_before)
+        check("zero_write/approval_mtime_unchanged",
+              os.stat(p.approval_path()).st_mtime_ns == approval_mtime_before)
+        check("zero_write/intent_hash_unchanged",
+              core.sha256_of_file(p.intent_path) == intent_hash_before)
+        check("zero_write/approval_hash_unchanged",
+              core.sha256_of_file(p.approval_path()) == approval_hash_before)
+    finally:
+        p.cleanup()
+
+
+# --------------------------------------------------------------------------- #
 # Baseline drift: content approved must be the content on disk
 # --------------------------------------------------------------------------- #
 
@@ -594,6 +736,9 @@ def main():
     test_pmo_intent_011_unchanged()
     test_marker_no_silent_overwrite_and_no_cross_project_reuse()
     test_baseline_drift_detected()
+    test_reconciliation_preserves_existing_approval_evidence_exactly()
+    test_reconciliation_identity_mismatch_fails_closed()
+    test_fully_consistent_idempotent_zero_writes()
 
     total = len(_RESULTS)
     failed = [n for n, ok in _RESULTS if not ok]

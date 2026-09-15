@@ -1586,6 +1586,7 @@ PMO_INTENT_APPROVAL_CODES = {
     "PMO-INTENT-APPROVAL-013": "INTENT_WRITE_FAILED",
     "PMO-INTENT-APPROVAL-014": "POST_WRITE_VERIFICATION_FAILED",
     "PMO-INTENT-APPROVAL-015": "INTERNAL_ERROR",
+    "PMO-INTENT-APPROVAL-016": "EXISTING_APPROVAL_IDENTITY_MISMATCH",
 }
 
 
@@ -1807,9 +1808,72 @@ def run_begin_preconditions(root, approved_by, decision_date,
     if identity_check is not None:
         return identity_check, None
 
+    # ----------------------------------------------------------------- #
+    # NEW APPROVAL vs RECONCILIATION OF EXISTING APPROVAL
+    # ----------------------------------------------------------------- #
+    # An approval record that already exists, is structurally valid, and
+    # matches this artifact/version (`validate_pm_approval` - the exact
+    # rule PMO-INTENT-011 enforces - reused here unchanged, always with
+    # `existing_status=None` per its own documented contract) is READ-ONLY
+    # source evidence for this transaction. Reconciliation never
+    # regenerates, normalizes, rewrites, or reformats it - not even a
+    # free-text field such as `notes` - it only repairs the canonical
+    # Intent's Acceptance representation FROM it. A transaction only ever
+    # creates/writes new approval evidence when no such valid record exists
+    # yet (a genuine first-time approval).
+    existing_record, _load_err = load_intent_approval(root)
+    existing_valid = existing_record is not None and \
+        validate_pm_approval(None, "VALIDATED", meta, root) is None
+
+    if existing_valid:
+        mode = "RECONCILE_EXISTING"
+        record_approved_by = _clean(existing_record.get("approved_by"))
+        record_decision_date = _clean(existing_record.get("approved_at"))
+        if not record_decision_date:
+            return deny(
+                "PMO-INTENT-APPROVAL-016",
+                "the existing approval record has no 'approved_at' date to "
+                "reconcile from.",
+            ), None
+        # The supplied approved_by/decision_date must describe the SAME,
+        # already-recorded decision - this transaction never silently
+        # substitutes a different identity, and never silently creates a
+        # second decision under a mismatched name/date.
+        if record_approved_by.casefold() != approved_by.strip().casefold() or \
+                record_decision_date != decision_date:
+            return deny(
+                "PMO-INTENT-APPROVAL-016",
+                "an existing, valid approval record already covers Intent "
+                "v{ver} (approved_by='{rec_by}', approved_at='{rec_date}'), "
+                "but this call supplied approved_by='{by}', "
+                "decision_date='{date}'. Reconciling an existing approval "
+                "requires the same approver and date already on record - "
+                "supply matching values, or resolve the existing record "
+                "manually before recording a genuinely new decision.".format(
+                    ver=intent_version, rec_by=record_approved_by,
+                    rec_date=record_decision_date, by=approved_by.strip(),
+                    date=decision_date,
+                ),
+            ), None
+        effective_approved_by = record_approved_by
+        effective_decision_date = record_decision_date
+        acceptance_record_for_schema_check = existing_record
+    else:
+        mode = "NEW_APPROVAL"
+        effective_approved_by = approved_by.strip()
+        effective_decision_date = decision_date
+        acceptance_record_for_schema_check = {
+            "decision": APPROVAL_REQUIRED_DECISION,
+            "approval_source": APPROVAL_REQUIRED_SOURCE,
+            "artifact": INTENT_POSIX,
+            "version": intent_version,
+            "approved_by": effective_approved_by,
+        }
+
     next_stage = meta.get("next stage")
     candidate, ok = apply_approval_to_intent(
-        content, approved_by.strip(), decision_date, intent_version, next_stage)
+        content, effective_approved_by, effective_decision_date,
+        intent_version, next_stage)
     if not ok or candidate is None:
         return deny(
             "PMO-INTENT-APPROVAL-005",
@@ -1818,52 +1882,45 @@ def run_begin_preconditions(root, approved_by, decision_date,
         ), None
 
     candidate_meta = parse_doc_control(candidate)
-    candidate_record = {
-        "decision": APPROVAL_REQUIRED_DECISION,
-        "approval_source": APPROVAL_REQUIRED_SOURCE,
-        "artifact": INTENT_POSIX,
-        "version": intent_version,
-        "approved_by": approved_by.strip(),
-    }
     light = _light_checks(candidate, candidate_meta, root)
     if light is not None:
         return light, None
     schema_check = full_schema_validation(
         candidate, candidate_meta, root, status="VALIDATED",
-        acceptance_record_override=candidate_record)
+        acceptance_record_override=acceptance_record_for_schema_check)
     if schema_check is not None:
         return schema_check, None
 
-    # Idempotency: if the CURRENT on-disk content is already byte-identical
-    # to what this transaction would produce, and a matching approval
-    # record already exists on disk, there is nothing to do.
-    if existing_status == "VALIDATED":
-        pm_check = validate_pm_approval(None, "VALIDATED", meta, root)
-        acceptance_check = validate_acceptance_consistency(content, meta, root)
-        if pm_check is None and acceptance_check is None:
-            existing_record, _err = load_intent_approval(root)
-            if existing_record is not None and \
-                    _clean(existing_record.get("approved_by", "")).casefold() == \
-                    approved_by.strip().casefold() and \
-                    str(existing_record.get("version")).strip() == intent_version:
-                return deny(
-                    "PMO-INTENT-APPROVAL-003",
-                    "Intent v{} is already VALIDATED with a matching, "
-                    "internally-consistent approval record - nothing to "
-                    "do.".format(intent_version),
-                ), None
+    # Idempotency: when the existing approval is already valid AND the
+    # CURRENT on-disk Intent is already VALIDATED with a consistent
+    # Acceptance section, there is nothing to do at all - no Intent write,
+    # no approval-evidence write, no marker.
+    if existing_status == "VALIDATED" and existing_valid:
+        acceptance_already_ok = validate_acceptance_consistency(
+            content, meta, root) is None
+        if acceptance_already_ok:
+            return deny(
+                "PMO-INTENT-APPROVAL-003",
+                "Intent v{} is already VALIDATED with a matching, "
+                "internally-consistent approval record - nothing to "
+                "do.".format(intent_version),
+            ), None
 
     plan = {
+        "mode": mode,
         "project_id": project_id,
         "artifact_path": INTENT_POSIX,
         "intent_version": intent_version,
-        "approved_by": approved_by.strip(),
-        "decision_date": decision_date,
+        "approved_by": effective_approved_by,
+        "decision_date": effective_decision_date,
         "approval_statement": approval_statement,
         "baseline_intent_hash": sha256_of_text(content),
+        "approval_evidence_hash_before": sha256_of_file(
+            os.path.join(root, INTENT_APPROVAL_RELPATH)),
         "candidate_intent_content": candidate,
-        "candidate_approval_yaml": render_approval_yaml(
-            approved_by.strip(), decision_date, intent_version,
+        "candidate_approval_yaml": None if mode == "RECONCILE_EXISTING" else
+        render_approval_yaml(
+            effective_approved_by, effective_decision_date, intent_version,
             approval_statement=approval_statement,
             notes="Approval is scoped to this Intent version as the "
                  "governed business baseline. It does not itself authorize "
@@ -2005,24 +2062,37 @@ def finalize_transaction(root, marker_data):
         return decision, report
 
     evidence_path = os.path.join(root, INTENT_APPROVAL_RELPATH)
-    existing_evidence_text = read_text(evidence_path)
-    needs_evidence_write = existing_evidence_text != plan["candidate_approval_yaml"]
-    if needs_evidence_write:
-        try:
-            write_text(evidence_path, plan["candidate_approval_yaml"])
-        except Exception as exc:
-            return deny(
-                "PMO-INTENT-APPROVAL-012",
-                "could not write '{}' ({}). No Intent content was "
-                "touched.".format(INTENT_APPROVAL_POSIX, exc),
-            ), report
-        written_back = read_text(evidence_path)
-        if written_back != plan["candidate_approval_yaml"]:
-            return deny(
-                "PMO-INTENT-APPROVAL-012",
-                "'{}' did not verify after writing (re-read did not match "
-                "what was written).".format(INTENT_APPROVAL_POSIX),
-            ), report
+    reconciling_existing = plan.get("mode") == "RECONCILE_EXISTING"
+
+    if reconciling_existing:
+        # GOVERNANCE: an existing, already-valid approval record is
+        # read-only source evidence during reconciliation. It is NEVER
+        # regenerated, normalized, rewritten, or reformatted here - not
+        # even a free-text field such as `notes` - regardless of whether
+        # its exact bytes differ from what this module's own template would
+        # otherwise render. `plan["candidate_approval_yaml"]` is always
+        # None in this mode (see `run_begin_preconditions`) specifically so
+        # there is nothing to accidentally write.
+        report["approval_evidence_write_skipped"] = True
+    else:
+        existing_evidence_text = read_text(evidence_path)
+        needs_evidence_write = existing_evidence_text != plan["candidate_approval_yaml"]
+        if needs_evidence_write:
+            try:
+                write_text(evidence_path, plan["candidate_approval_yaml"])
+            except Exception as exc:
+                return deny(
+                    "PMO-INTENT-APPROVAL-012",
+                    "could not write '{}' ({}). No Intent content was "
+                    "touched.".format(INTENT_APPROVAL_POSIX, exc),
+                ), report
+            written_back = read_text(evidence_path)
+            if written_back != plan["candidate_approval_yaml"]:
+                return deny(
+                    "PMO-INTENT-APPROVAL-012",
+                    "'{}' did not verify after writing (re-read did not "
+                    "match what was written).".format(INTENT_APPROVAL_POSIX),
+                ), report
 
     intent_path = os.path.join(root, INTENT_RELPATH)
     try:
@@ -2055,5 +2125,16 @@ def finalize_transaction(root, marker_data):
             "PMO-INTENT-APPROVAL-014",
             "post-write verification failed: {}".format(post_check.message),
         ), report
+
+    if reconciling_existing:
+        after_hash = sha256_of_file(evidence_path)
+        if after_hash != plan.get("approval_evidence_hash_before"):
+            return deny(
+                "PMO-INTENT-APPROVAL-014",
+                "post-write verification failed: '{}' was supposed to "
+                "remain untouched during reconciliation of an existing "
+                "approval, but its hash changed.".format(
+                    INTENT_APPROVAL_POSIX),
+            ), report
 
     return None, report
