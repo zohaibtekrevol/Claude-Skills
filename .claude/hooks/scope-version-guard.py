@@ -30,10 +30,41 @@ Behaviour
 
 Error IDs
 ---------
-PMO-SCOPE-001  INTENT_NOT_VALIDATED            - Intent absent / not VALIDATED /
-                                                version < 1.0, or project-config
-                                                does not record the Intent as
-                                                approved + VALIDATED.
+PMO-SCOPE-001  INTENT_NOT_VALIDATED            - Intent absent/unreadable; Intent
+                                                Status != VALIDATED; Intent has
+                                                no Intent Version value; no
+                                                structurally valid, matching PM
+                                                approval record at
+                                                .pmo/approvals/intent-approval.yaml
+                                                (decision APPROVED,
+                                                approval_source PM_EXPLICIT,
+                                                artifact/version match); or the
+                                                Intent's project identity does
+                                                not match project-config.yaml.
+                                                Reuses
+                                                intent_approval_core.validate_pm_approval
+                                                (the same rule
+                                                intent-schema-guard.py enforces
+                                                as PMO-INTENT-011) and
+                                                .validate_project_identity - no
+                                                duplicated approval-validation
+                                                truth. There is deliberately NO
+                                                numeric Intent-version floor: a
+                                                VALIDATED Intent is a legitimate
+                                                governed baseline at any version
+                                                (e.g. "0.3") once a matching PM
+                                                approval exists ("approval is
+                                                the baseline" - Option B).
+                                                project-config's
+                                                workflow.intent.approved /
+                                                artifacts.intent.status fields
+                                                are NOT consulted here - they
+                                                are derived/display state, not
+                                                authorization; the canonical
+                                                Intent + its approval evidence
+                                                are the sole source of truth
+                                                (governance.source_of_truth:
+                                                "repository").
 PMO-SCOPE-002  PROJECT_IDENTITY_MISMATCH       - Scope Project / Client /
                                                 Project ID != project-config.
 PMO-SCOPE-003  SCOPE_SCHEMA_INVALID            - required section(s) / Document
@@ -103,6 +134,20 @@ import re
 import shlex
 import subprocess
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+# Imported under its own namespace (never `from ... import <bare names>`):
+# this module already defines its own `_clean` / `_norm_status` / `deny` /
+# `Decision` / `validate_project_identity` for SCOPE's own field parsing, and
+# bare-importing same-named functions from intent_approval_core would
+# silently shadow them. `iac.*` is used explicitly at every call site instead
+# - see `validate_prerequisite_intent` (PMO-SCOPE-001) for why: it reuses
+# `intent_approval_core.validate_pm_approval` - the exact same rule
+# `intent-schema-guard.py` enforces as PMO-INTENT-011 - so there is no
+# duplicated approval-validation truth between the Intent and Scope guards.
+import intent_approval_core as iac  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -1043,37 +1088,72 @@ def _clean(value):
 
 
 def validate_prerequisite_intent(root):
-    """PMO-SCOPE-001 - the Intent must be VALIDATED (>= 1.0) and recorded so
-    in project-config."""
+    """PMO-SCOPE-001 - Scope-entry eligibility ("approval is the baseline",
+    Option B). Directly validates the canonical governed Intent state - it
+    does not consult project-config's Intent-derived fields at all, since
+    those are display/index state with no synchronization owner (see
+    intent_approval_core.py module docstring for the full architecture
+    note). Required, in order:
+
+    A. Intent exists and is readable.
+    B. Intent Status == VALIDATED.
+    C. A structurally valid, matching PM approval record exists (decision
+       APPROVED, approval_source PM_EXPLICIT, artifact + version match) -
+       reuses `intent_approval_core.validate_pm_approval` unchanged, so
+       this is exactly the same rule intent-schema-guard.py enforces as
+       PMO-INTENT-011 for the Intent's own VALIDATED transition.
+    D. The Intent's project identity matches project-config.yaml - reuses
+       `intent_approval_core.validate_project_identity` unchanged.
+
+    Deliberately NO numeric Intent-version floor: a VALIDATED Intent is a
+    legitimate governed baseline at any version string once a matching PM
+    approval exists.
+    """
     intent_path = os.path.join(root, INTENT_POSIX)
     text = read_text(intent_path)
     if text is None:
         return deny("PMO-SCOPE-001",
                     "docs/pmo/intent/intent.md not found - Scope must not be "
                     "based on a missing/unvalidated Intent.")
-    status = _norm_status(_find_field(text, "Status"))
-    version = parse_version_tuple(_find_field(text, "Intent Version"))
+
+    meta = iac.parse_doc_control(text)
+    status = iac._norm_status(meta.get("status"))
     if status != "VALIDATED":
         return deny("PMO-SCOPE-001",
                     "Intent Status is '{}', not VALIDATED.".format(status))
-    if version is None or version < (1, 0):
+
+    if not iac._clean(meta.get("intent version")):
         return deny("PMO-SCOPE-001",
-                    "Intent Version must be >= 1.0 (found "
-                    "'{}').".format(_find_field(text, "Intent Version")))
+                    "the Intent has no 'Intent Version' in Document "
+                    "Control.")
+
+    # C - reuse the exact same PM-approval rule intent-schema-guard.py
+    # enforces (PMO-INTENT-011). `existing_status=None` is that function's
+    # documented contract for an independent, from-scratch verification
+    # (it is not asking "did this Write just promote the Intent" - it is
+    # asking "is there, right now, a valid approval for this Intent").
+    approval_check = iac.validate_pm_approval(None, "VALIDATED", meta, root)
+    if approval_check is not None:
+        return deny(
+            "PMO-SCOPE-001",
+            "the canonical Intent is not backed by a valid, matching PM "
+            "approval record at '{}' - {}".format(
+                iac.INTENT_APPROVAL_POSIX, approval_check.message),
+        )
+
+    # D - the Intent's own project identity must match project-config.
     cfg = load_config(root)
     if not isinstance(cfg, dict):
         return deny("PMO-SCOPE-001",
                     ".pmo/project-config.yaml is missing or unreadable.")
-    wf = cfg.get("workflow") or {}
-    wi = wf.get("intent") or {}
-    if wi.get("approved") is not True:
-        return deny("PMO-SCOPE-001",
-                    "project-config workflow.intent.approved is not true.")
-    arts = cfg.get("artifacts") or {}
-    ai = arts.get("intent") or {}
-    if _clean(ai.get("status")) != "VALIDATED":
-        return deny("PMO-SCOPE-001",
-                    "project-config artifacts.intent.status is not VALIDATED.")
+    identity_check = iac.validate_project_identity(meta, cfg)
+    if identity_check is not None:
+        return deny(
+            "PMO-SCOPE-001",
+            "the Intent's project identity does not match "
+            "project-config.yaml - {}".format(identity_check.message),
+        )
+
     return None
 
 

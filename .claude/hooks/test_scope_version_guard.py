@@ -36,21 +36,32 @@ def code(decision):
 # fixtures
 # --------------------------------------------------------------------------- #
 
-INTENT_MD = """# Intent: Smart Basket
+def build_intent(status="VALIDATED", version="1.0", project_id=None):
+    id_row = "| Project ID | {} |\n".format(project_id) if project_id else ""
+    return (
+        "# Intent: Smart Basket\n\n"
+        "| Field | Value |\n"
+        "|---|---|\n"
+        "| Status | {} |\n"
+        "| Intent Version | {} |\n"
+        "{}"
+        "\n"
+        "## 6. High-Level Product Requirements\n\n"
+        "| ID | Requirement | Evidence |\n"
+        "|---|---|---|\n"
+        "| INT-REQ-001 | Customer app | SRC-001 |\n"
+        "| INT-REQ-002 | Rider app | SRC-001 |\n"
+    ).format(status, version, id_row)
 
-| Field | Value |
-|---|---|
-| Status | VALIDATED |
-| Intent Version | 1.0 |
 
-## 6. High-Level Product Requirements
+INTENT_MD = build_intent(status="VALIDATED", version="1.0")
 
-| ID | Requirement | Evidence |
-|---|---|---|
-| INT-REQ-001 | Customer app | SRC-001 |
-| INT-REQ-002 | Rider app | SRC-001 |
-"""
-
+# PMO-SCOPE-001 no longer consults these project-config fields at all (they
+# are display/index state with no synchronization owner - see
+# scope-version-guard.py / intent_approval_core.py). They are still written
+# into CONFIG_YAML here, deliberately STALE-BY-DEFAULT (approved: false /
+# status: "NOT_CREATED"), to prove the guard does not depend on them - see
+# test_SCOPE_001_stale_project_config_fields_do_not_gate.
 CONFIG_YAML = (
     'project:\n'
     '  id: "SMART-BASKET"\n'
@@ -58,10 +69,23 @@ CONFIG_YAML = (
     '  client: "Smart Basket / eBasket KSA"\n'
     'artifacts:\n'
     '  intent:\n'
-    '    status: "VALIDATED"\n'
+    '    status: "NOT_CREATED"\n'
     'workflow:\n'
     '  intent:\n'
-    '    approved: true\n'
+    '    approved: false\n'
+)
+
+# Default, valid, matching PM-explicit approval evidence for INTENT_MD
+# (Intent Version "1.0", project SMART-BASKET). Written by `run()` for
+# every test unless a test explicitly overrides `intent_approval=`, so
+# existing tests continue to exercise their own intended condition rather
+# than incidentally tripping the new PMO-SCOPE-001 approval check.
+INTENT_APPROVAL_OK = (
+    'decision: "APPROVED"\n'
+    'approval_source: "PM_EXPLICIT"\n'
+    'artifact: "docs/pmo/intent/intent.md"\n'
+    'version: "1.0"\n'
+    'approved_by: "Muneeb"\n'
 )
 
 APPROVAL_OK = (
@@ -161,7 +185,8 @@ def build_scope(version="0.1", status="DRAFT_CLIENT_REVIEW",
 
 
 def run(tool, tool_input, scope_files=None, approval=None,
-        intent=INTENT_MD, config=CONFIG_YAML):
+        intent=INTENT_MD, config=CONFIG_YAML,
+        intent_approval=INTENT_APPROVAL_OK):
     tmp = tempfile.mkdtemp(prefix="scope-guard-test-")
     try:
         os.makedirs(os.path.join(tmp, ".pmo", "approvals"), exist_ok=True)
@@ -171,6 +196,9 @@ def run(tool, tool_input, scope_files=None, approval=None,
             _w(os.path.join(tmp, ".pmo", "project-config.yaml"), config)
         if intent is not None:
             _w(os.path.join(tmp, "docs", "pmo", "intent", "intent.md"), intent)
+        if intent_approval is not None:
+            _w(os.path.join(tmp, ".pmo", "approvals", "intent-approval.yaml"),
+               intent_approval)
         for name, text in (scope_files or {}).items():
             _w(os.path.join(tmp, "docs", "pmo", "scope", name), text)
         if approval is not None:
@@ -493,6 +521,181 @@ def test_AC_provenance_skipped_without_intent_open():
 
 
 # --------------------------------------------------------------------------- #
+# PMO-SCOPE-001 (new contract) - "approval is the baseline" (Option B):
+# canonical Intent + a valid, matching PM approval record establish
+# Scope-entry eligibility, at ANY Intent version - no numeric floor.
+#
+# `validate_prerequisite_intent` is called only inside `full_scope_validation`
+# (a Scope finalisation-gate check, like every sibling PMO-SCOPE-* schema/
+# workflow rule) - not on ordinary progressive DRAFT authoring (see test_A,
+# which already proves a DRAFT-status create is allowed regardless). These
+# tests therefore call the function directly against a constructed temp
+# project root, isolating exactly the logic this task changed from Scope's
+# own document-completeness/status-gating rules entirely.
+# --------------------------------------------------------------------------- #
+
+def _wmt_intent(status="VALIDATED", version="0.3", project_id=None):
+    return build_intent(status=status, version=version, project_id=project_id)
+
+
+def _intent_root(intent, intent_approval=None, config=CONFIG_YAML):
+    tmp = tempfile.mkdtemp(prefix="scope-guard-scope001-")
+    os.makedirs(os.path.join(tmp, ".pmo", "approvals"), exist_ok=True)
+    os.makedirs(os.path.join(tmp, "docs", "pmo", "intent"), exist_ok=True)
+    if config is not None:
+        _w(os.path.join(tmp, ".pmo", "project-config.yaml"), config)
+    if intent is not None:
+        _w(os.path.join(tmp, "docs", "pmo", "intent", "intent.md"), intent)
+    if intent_approval is not None:
+        _w(os.path.join(tmp, ".pmo", "approvals", "intent-approval.yaml"),
+           intent_approval)
+    return tmp
+
+
+def _check_prereq(name, root, expect_allow):
+    try:
+        d = mod.validate_prerequisite_intent(root)
+        if expect_allow:
+            check(name, d is None, "{} / {}".format(code(d), getattr(d, "message", "")))
+        else:
+            check(name, code(d) == "PMO-SCOPE-001",
+                  "{} / {}".format(code(d), getattr(d, "message", "")))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_SCOPE_001_validated_v0_3_with_valid_approval__ALLOW():
+    # (1) the real-world WM Trucking shape: VALIDATED at v0.3 (not 1.0) with
+    # a valid, matching approval - must be accepted.
+    approval = INTENT_APPROVAL_OK.replace('version: "1.0"', 'version: "0.3"')
+    root = _intent_root(_wmt_intent(version="0.3"), approval)
+    _check_prereq("SCOPE001/v0_3_valid_approval__ALLOW", root, expect_allow=True)
+
+
+def test_SCOPE_001_validated_v0_9_with_valid_approval__ALLOW():
+    # (2) an arbitrary sub-1.0 version other than 0.3 also passes - proves
+    # this is not a special case for "0.3" specifically.
+    approval = INTENT_APPROVAL_OK.replace('version: "1.0"', 'version: "0.9"')
+    root = _intent_root(_wmt_intent(version="0.9"), approval)
+    _check_prereq("SCOPE001/v0_9_valid_approval__ALLOW", root, expect_allow=True)
+
+
+def test_SCOPE_001_no_numeric_version_floor():
+    # (3) sweep several sub-1.0 and non-1.0 version strings - none of them
+    # is rejected merely for being < 1.0.
+    for v in ("0.1", "0.2", "0.3", "0.9", "2.0", "10.4"):
+        approval = INTENT_APPROVAL_OK.replace('version: "1.0"',
+                                              'version: "{}"'.format(v))
+        root = _intent_root(_wmt_intent(version=v), approval)
+        _check_prereq("SCOPE001/no_version_floor[{}]".format(v), root,
+                      expect_allow=True)
+
+
+def test_SCOPE_001_draft_intent_blocked():
+    # (4) DRAFT Intent + an otherwise-valid-looking approval record is
+    # still blocked - Status VALIDATED is a hard requirement.
+    approval = INTENT_APPROVAL_OK.replace('version: "1.0"', 'version: "0.3"')
+    root = _intent_root(_wmt_intent(status="DRAFT", version="0.3"), approval)
+    _check_prereq("SCOPE001/draft_intent__DENY_001", root, expect_allow=False)
+
+
+def test_SCOPE_001_missing_approval_blocked():
+    # (5) VALIDATED Intent, no approval evidence at all.
+    root = _intent_root(_wmt_intent(version="0.3"), intent_approval=None)
+    _check_prereq("SCOPE001/missing_approval__DENY_001", root, expect_allow=False)
+
+
+def test_SCOPE_001_malformed_approval_blocked():
+    # (6) structurally malformed approval evidence (not a mapping).
+    root = _intent_root(_wmt_intent(version="0.3"),
+                        "not: [a, valid, mapping\n")
+    _check_prereq("SCOPE001/malformed_approval__DENY_001", root, expect_allow=False)
+
+
+def test_SCOPE_001_version_mismatched_approval_blocked():
+    # (7) approval evidence exists and is otherwise valid, but for a
+    # different Intent version than the one actually on disk.
+    approval = INTENT_APPROVAL_OK.replace('version: "1.0"', 'version: "0.2"')
+    root = _intent_root(_wmt_intent(version="0.3"), approval)
+    _check_prereq("SCOPE001/version_mismatch__DENY_001", root, expect_allow=False)
+
+
+def test_SCOPE_001_wrong_artifact_approval_blocked():
+    # (8) approval evidence names a different artifact entirely.
+    approval = (INTENT_APPROVAL_OK
+               .replace('version: "1.0"', 'version: "0.3"')
+               .replace('artifact: "docs/pmo/intent/intent.md"',
+                        'artifact: "docs/pmo/scope/scope-v0.1.md"'))
+    root = _intent_root(_wmt_intent(version="0.3"), approval)
+    _check_prereq("SCOPE001/wrong_artifact__DENY_001", root, expect_allow=False)
+
+
+def test_SCOPE_001_non_approved_decision_blocked():
+    # (9) decision is not APPROVED.
+    approval = (INTENT_APPROVAL_OK
+               .replace('version: "1.0"', 'version: "0.3"')
+               .replace('decision: "APPROVED"', 'decision: "PENDING"'))
+    root = _intent_root(_wmt_intent(version="0.3"), approval)
+    _check_prereq("SCOPE001/non_approved_decision__DENY_001", root, expect_allow=False)
+
+
+def test_SCOPE_001_stale_project_config_fields_do_not_gate():
+    # (10) + (11): CONFIG_YAML is deliberately stale-by-default
+    # (workflow.intent.approved: false, artifacts.intent.status:
+    # "NOT_CREATED" - see its definition above). A VALIDATED Intent with a
+    # valid, matching approval must still be ALLOWED despite that stale
+    # project-config state - it is never consulted as a gate.
+    assert 'approved: false' in CONFIG_YAML and '"NOT_CREATED"' in CONFIG_YAML
+    approval = INTENT_APPROVAL_OK.replace('version: "1.0"', 'version: "0.3"')
+    root = _intent_root(_wmt_intent(version="0.3"), approval, config=CONFIG_YAML)
+    _check_prereq("SCOPE001/stale_project_config_does_not_block__ALLOW",
+                 root, expect_allow=True)
+
+
+def test_SCOPE_001_intent_identity_mismatch_blocked():
+    # extra (check D): the Intent's OWN Project ID field disagrees with
+    # project-config.yaml.
+    approval = INTENT_APPROVAL_OK.replace('version: "1.0"', 'version: "0.3"')
+    root = _intent_root(_wmt_intent(version="0.3", project_id="SOME-OTHER-PROJECT"),
+                        approval)
+    _check_prereq("SCOPE001/intent_identity_mismatch__DENY_001", root,
+                 expect_allow=False)
+
+
+def test_SCOPE_001_matching_project_id_allowed():
+    # sanity companion: the same fixture shape, but with the Intent's
+    # Project ID correctly matching project-config - must be ALLOWED.
+    approval = INTENT_APPROVAL_OK.replace('version: "1.0"', 'version: "0.3"')
+    root = _intent_root(_wmt_intent(version="0.3", project_id="SMART-BASKET"),
+                        approval)
+    _check_prereq("SCOPE001/intent_identity_match__ALLOW", root, expect_allow=True)
+
+
+def test_SCOPE_001_wired_into_real_finalization_gate():
+    # End-to-end wiring proof (not just a direct unit call): a Scope
+    # finalisation (Status: PM_REVIEWED, a real Scope-guard gate) against a
+    # sub-1.0 VALIDATED Intent with valid approval passes through the real
+    # process()/full_scope_validation() path, and is correctly denied when
+    # the approval evidence is removed - proving PMO-SCOPE-001's new logic
+    # is actually reachable from a live Write, not only callable directly.
+    approval = INTENT_APPROVAL_OK.replace('version: "1.0"', 'version: "0.3"')
+    finalizing_scope = build_scope(version="0.1", status="PM_REVIEWED")
+
+    d_allow = run("Write", {"file_path": "docs/pmo/scope/scope-v0.1.md",
+                            "content": finalizing_scope},
+                 intent=_wmt_intent(version="0.3"), intent_approval=approval)
+    check("SCOPE001/e2e_finalization_v0_3_allowed", d_allow is None,
+          "{} / {}".format(code(d_allow), getattr(d_allow, "message", "")))
+
+    d_deny = run("Write", {"file_path": "docs/pmo/scope/scope-v0.1.md",
+                           "content": finalizing_scope},
+                intent=_wmt_intent(version="0.3"), intent_approval=None)
+    check("SCOPE001/e2e_finalization_missing_approval_denied",
+          code(d_deny) == "PMO-SCOPE-001",
+          "{} / {}".format(code(d_deny), getattr(d_deny, "message", "")))
+
+
+# --------------------------------------------------------------------------- #
 
 def main():
     test_units()
@@ -512,7 +715,20 @@ def main():
                test_Z_new_scope_native_scp_open,
                test_AA_open_referenced_after_one_definition,
                test_AB_retired_or_absent_intent_open_reused,
-               test_AC_provenance_skipped_without_intent_open):
+               test_AC_provenance_skipped_without_intent_open,
+               test_SCOPE_001_validated_v0_3_with_valid_approval__ALLOW,
+               test_SCOPE_001_validated_v0_9_with_valid_approval__ALLOW,
+               test_SCOPE_001_no_numeric_version_floor,
+               test_SCOPE_001_draft_intent_blocked,
+               test_SCOPE_001_missing_approval_blocked,
+               test_SCOPE_001_malformed_approval_blocked,
+               test_SCOPE_001_version_mismatched_approval_blocked,
+               test_SCOPE_001_wrong_artifact_approval_blocked,
+               test_SCOPE_001_non_approved_decision_blocked,
+               test_SCOPE_001_stale_project_config_fields_do_not_gate,
+               test_SCOPE_001_intent_identity_mismatch_blocked,
+               test_SCOPE_001_matching_project_id_allowed,
+               test_SCOPE_001_wired_into_real_finalization_gate):
         fn()
     total = len(_RESULTS)
     failed = [n for n, ok in _RESULTS if not ok]
