@@ -767,5 +767,323 @@ class SpecsGuardTests(unittest.TestCase):
             guard.detect_relevant_git_action("ls -la"), (None, False))
 
 
+# --------------------------------------------------------------------------- #
+# NEW (no-Scope) lifecycle - Intent + Q&A entry contract
+# --------------------------------------------------------------------------- #
+#
+# A project with no docs/pmo/scope/scope-v*.md artifact at all must be able to
+# reach a valid Specs generation using only Intent + a resolved Q&A register
+# (PMO-SPEC-021/022/023) - PMO-SPEC-001 (Scope readiness) and SCP-REQ-based
+# traceability (PMO-SPEC-004/015) are never consulted on this path. These
+# fixtures never touch docs/pmo/scope/ at all - proving the framework does not
+# require a project to manufacture an empty Scope directory for compatibility.
+
+NEW_PATH_CONFIG = '''schema_version: "1.0"
+
+project:
+  id: "SMART-BASKET"
+  name: "Smart Basket"
+  client: "Smart Basket / eBasket KSA"
+
+repository:
+  provider: "bitbucket"
+  workspace: "devops-tekrevol"
+  repository: "lets-explore-more-specs"
+  verified: true
+'''
+
+NEW_PATH_INTENT = '''# Intent
+
+## Document Control
+
+- **Project:** Smart Basket
+- **Client:** Smart Basket / eBasket KSA
+- **Project ID:** SMART-BASKET
+- **Intent Version:** 1.0
+- **Status:** VALIDATED
+
+## 6. High-Level Product Requirements
+
+| ID | Requirement |
+|---|---|
+| INT-REQ-001 | Customer app |
+| INT-REQ-002 | Rider app |
+'''
+
+NEW_PATH_APPROVAL = '''decision: APPROVED
+approval_source: PM_EXPLICIT
+artifact: docs/pmo/intent/intent.md
+version: "1.0"
+approved_by: Jane PM
+'''
+
+
+def qa_record(rid, status="RESOLVED", blocking="NO", resolution="Resolved.",
+             authority="PM_EXPLICIT", evidence="2026-09-11"):
+    return (
+        "#### {rid} - Title\n\n"
+        "- **ID:** {rid}\n"
+        "- **Type:** QUESTION\n"
+        "- **Statement:** Statement.\n"
+        "- **Why Resolution Is Required:** Needed for FR design.\n"
+        "- **Source / Evidence:** SRC-001\n"
+        "- **Related Intent Item:** \n"
+        "- **Owner:** PM\n"
+        "- **Status:** {status}\n"
+        "- **Blocking:** {blocking}\n"
+        "- **Resolution:** {resolution}\n"
+        "- **Resolution Authority:** {authority}\n"
+        "- **Resolution Evidence / Date:** {evidence}\n"
+        "- **Specs Impact:** Impacts FR-001 / NFR-001.\n\n"
+    ).format(rid=rid, status=status, blocking=blocking, resolution=resolution,
+             authority=authority, evidence=evidence)
+
+
+def qa_doc(records_md):
+    return (
+        "# Questions & Assumptions\n\n"
+        "## Document Control\n\n"
+        "- **Project:** Smart Basket\n"
+        "- **Client:** Smart Basket / eBasket KSA\n"
+        "- **Project ID:** SMART-BASKET\n"
+        "- **PM:** Jane PM\n"
+        "- **Date:** 2026-09-11\n"
+        "- **Intent Version:** 1.0\n\n"
+        "## Register\n\n"
+        "{}".format(records_md)
+    )
+
+
+NEW_PATH_SPEC = '''# Specification: Smart Basket
+
+## Specification Document Control
+
+- **Project:** Smart Basket
+- **Client:** Smart Basket / eBasket KSA
+- **Project ID:** SMART-BASKET
+- **Spec Version:** 0.1
+- **Spec Status:** PROVISIONAL
+- **Intent Version:** 1.0
+- **Generated From:** docs/pmo/requirements/questions-and-assumptions.md
+- **Last Updated:** 2026-09-11T00:00:00Z
+- **Execution Authorized:** false
+- **Repository:** bitbucket:devops-tekrevol/lets-explore-more-specs
+
+## Functional Requirements
+
+### FR-001 - Customer places an online order
+
+- **ID:** FR-001
+- **Title:** Customer places an online order
+- **Module:** MOD-004 / Cart, Checkout and Payments
+- **Actor(s):** B2C customer
+- **Requirement:** The system lets a signed-in B2C customer confirm a cart and place an order.
+- **Source Requirement:** INT-REQ-001
+- **Introduced In:** 0.1
+- **Last Modified In:** 0.1
+- **Change Source:** INITIAL_INTENT
+- **Priority:** MUST
+- **Preconditions:** The customer is authenticated.
+- **Trigger:** The customer confirms checkout.
+- **Primary Behavior:** The system validates the cart and records the order.
+- **Business Rules:** N/A
+- **Validation Rules:** The cart must be non-empty.
+- **Alternate / Exception Behavior:** If payment fails the order is not created.
+- **Permissions:** A B2C customer may place their own order.
+- **Inputs:** Cart contents.
+- **Outputs:** A persisted order.
+- **Dependencies:** N/A
+- **Acceptance Criteria:** Given a valid cart When checkout is confirmed Then an order is created.
+- **Status:** ACTIVE
+
+## Non-Functional Requirements
+
+### NFR-001 - Rider onboarding integrity
+
+- **ID:** NFR-001
+- **Title:** Rider onboarding integrity
+- **Category:** Security
+- **Requirement:** Rider onboarding verifies required documents before activation.
+- **Source Requirement:** INT-REQ-002
+- **Introduced In:** 0.1
+- **Last Modified In:** 0.1
+- **Change Source:** INITIAL_INTENT
+- **Acceptance Criteria:** Given an incomplete document set When a rider submits onboarding Then activation is blocked.
+- **Status:** ACTIVE
+
+## Data Requirements
+
+| Entity | Field | Required | Validation | Related FR |
+|---|---|---|---|---|
+| Order | order_reference | Yes | System-generated, unique | FR-001 |
+
+## Integrations
+
+| Integration | Provider | FR / NFR | OPEN |
+|---|---|---|---|
+| N/A | N/A | N/A | N/A |
+
+## Open Questions
+
+| ID | Provenance | Origin | Question |
+|---|---|---|---|
+
+## Intent -> Specs Traceability
+
+| Requirement ID | FR/NFR IDs | Coverage | Notes |
+|---|---|---|---|
+| INT-REQ-001 | FR-001 | COVERED |  |
+| INT-REQ-002 | NFR-001 | COVERED |  |
+
+## Specification Change History
+
+| Version | Date | Change Source | Changed IDs | Summary | PM Decision |
+|---|---|---|---|---|---|
+| 0.1 | 2026-09-11 | INITIAL_INTENT | FR-001, NFR-001 | Initial provisional specification generated from validated Intent + resolved Q&A | Generated |
+
+## Validation Summary
+
+All active Intent requirements are represented in the Intent -> Specs
+Traceability matrix. No Scope artifact was consulted or required.
+'''
+
+
+def mkroot_new_path(spec=NEW_PATH_SPEC, config=NEW_PATH_CONFIG,
+                    intent=NEW_PATH_INTENT, approval=NEW_PATH_APPROVAL,
+                    qa=None, write_spec=True):
+    root = tempfile.mkdtemp(prefix="pmo-specs-guard-newpath-")
+    os.makedirs(os.path.join(root, ".pmo", "approvals"))
+    os.makedirs(os.path.join(root, "docs", "pmo", "intent"))
+    os.makedirs(os.path.join(root, "docs", "pmo", "specs"))
+    os.makedirs(os.path.join(root, "docs", "pmo", "requirements"))
+    _w(os.path.join(root, ".pmo", "project-config.yaml"), config)
+    if intent is not None:
+        _w(os.path.join(root, "docs", "pmo", "intent", "intent.md"), intent)
+    if approval is not None:
+        _w(os.path.join(root, ".pmo", "approvals", "intent-approval.yaml"), approval)
+    if qa is not None:
+        _w(os.path.join(root, "docs", "pmo", "requirements",
+                        "questions-and-assumptions.md"), qa)
+    if write_spec:
+        _w(os.path.join(root, "docs", "pmo", "specs", "specs.md"), spec)
+    return root
+
+
+class SpecsGuardNewPathTests(unittest.TestCase):
+
+    QA_ALL_RESOLVED = qa_doc(qa_record("QST-001", status="RESOLVED", blocking="NO"))
+    QA_BLOCKING_OPEN = qa_doc(qa_record(
+        "QST-001", status="OPEN", blocking="YES",
+        resolution="", authority="", evidence=""))
+    QA_DEFERRED_NON_BLOCKING = qa_doc(qa_record(
+        "QST-001", status="DEFERRED", blocking="NO",
+        resolution="QuickBooks sync timing decided later; no date invented.",
+        authority="PM_EXPLICIT", evidence=""))
+    QA_NON_BLOCKING = qa_doc(qa_record(
+        "QST-001", status="NON_BLOCKING", blocking="NO",
+        resolution="Classified non-blocking for this baseline.",
+        authority="PM_EXPLICIT", evidence=""))
+
+    def _root(self, **kw):
+        root = mkroot_new_path(**kw)
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        return root
+
+    # Test 1 / 3 - no Scope required, no Scope generated -------------------- #
+    def test_new_path_never_requires_or_touches_scope(self):
+        root = self._root(qa=self.QA_ALL_RESOLVED)
+        scope_dir = os.path.join(root, "docs", "pmo", "scope")
+        self.assertFalse(os.path.isdir(scope_dir))
+        self.assertFalse(guard.has_legacy_scope(root))
+        self.assertIsNone(guard.full_spec_validation(root))
+        self.assertFalse(os.path.isdir(scope_dir),
+                         "Specs generation must never create docs/pmo/scope/.")
+
+    # Test 7 - OPEN + Blocking YES blocks -------------------------------- #
+    def test_open_blocking_yes_prevents_specs_023(self):
+        root = self._root(qa=self.QA_BLOCKING_OPEN)
+        d = guard.full_spec_validation(root)
+        self.assertIsNotNone(d)
+        self.assertEqual(d.code, "PMO-SPEC-023")
+
+    # Test 8 - DEFERRED + Blocking NO permits ----------------------------- #
+    def test_deferred_non_blocking_permits_specs(self):
+        root = self._root(qa=self.QA_DEFERRED_NON_BLOCKING)
+        self.assertIsNone(guard.full_spec_validation(root))
+
+    # Test 9 - NON_BLOCKING permits --------------------------------------- #
+    def test_non_blocking_status_permits_specs(self):
+        root = self._root(qa=self.QA_NON_BLOCKING)
+        self.assertIsNone(guard.full_spec_validation(root))
+
+    # Test 10 - all blocking items resolved permits ----------------------- #
+    def test_all_blocking_resolved_permits_specs(self):
+        root = self._root(qa=self.QA_ALL_RESOLVED)
+        self.assertIsNone(guard.full_spec_validation(root))
+
+    # Test 11 - traceability uses Intent + Q&A, never SCP-REQ -------------- #
+    def test_traceability_uses_intent_not_scope(self):
+        root = self._root(qa=self.QA_ALL_RESOLVED)
+        self.assertIsNone(guard.full_spec_validation(root))
+        req_ids = guard.read_intent_requirements(root)
+        self.assertEqual(req_ids, {"INT-REQ-001", "INT-REQ-002"})
+        self.assertIsNone(
+            guard.validate_intent_traceability_specs(req_ids, NEW_PATH_SPEC))
+        self.assertNotIn("SCP-REQ", NEW_PATH_SPEC)
+
+    # Test 12 - missing Intent blocks -------------------------------------- #
+    def test_missing_intent_blocks_021(self):
+        root = self._root(qa=self.QA_ALL_RESOLVED, intent=None)
+        d = guard.full_spec_validation(root)
+        self.assertIsNotNone(d)
+        self.assertEqual(d.code, "PMO-SPEC-021")
+
+    # Test 13 - non-VALIDATED Intent blocks --------------------------------- #
+    def test_draft_intent_blocks_021(self):
+        draft = NEW_PATH_INTENT.replace("**Status:** VALIDATED", "**Status:** DRAFT")
+        root = self._root(qa=self.QA_ALL_RESOLVED, intent=draft)
+        d = guard.full_spec_validation(root)
+        self.assertIsNotNone(d)
+        self.assertEqual(d.code, "PMO-SPEC-021")
+
+    # Test 14 - missing / mismatched approval blocks ------------------------ #
+    def test_missing_approval_blocks_021(self):
+        root = self._root(qa=self.QA_ALL_RESOLVED, approval=None)
+        d = guard.full_spec_validation(root)
+        self.assertIsNotNone(d)
+        self.assertEqual(d.code, "PMO-SPEC-021")
+
+    def test_mismatched_approval_version_blocks_021(self):
+        bad = NEW_PATH_APPROVAL.replace('version: "1.0"', 'version: "0.9"')
+        root = self._root(qa=self.QA_ALL_RESOLVED, approval=bad)
+        d = guard.full_spec_validation(root)
+        self.assertIsNotNone(d)
+        self.assertEqual(d.code, "PMO-SPEC-021")
+
+    # Test 15 - missing / invalid Q&A register blocks the new path --------- #
+    def test_missing_qa_register_blocks_022(self):
+        root = self._root(qa=None)
+        d = guard.full_spec_validation(root)
+        self.assertIsNotNone(d)
+        self.assertEqual(d.code, "PMO-SPEC-022")
+
+    def test_structurally_invalid_qa_register_blocks_022(self):
+        bad_qa = qa_doc(qa_record(
+            "QST-001", status="RESOLVED", blocking="NO",
+            resolution="", authority="", evidence=""))
+        root = self._root(qa=bad_qa)
+        d = guard.full_spec_validation(root)
+        self.assertIsNotNone(d)
+        self.assertEqual(d.code, "PMO-SPEC-022")
+
+    # Path selection is deterministic by artifact presence, never a flag --- #
+    def test_legacy_path_selected_once_a_scope_artifact_exists(self):
+        root = self._root(qa=self.QA_ALL_RESOLVED)
+        os.makedirs(os.path.join(root, "docs", "pmo", "scope"))
+        _w(os.path.join(root, "docs", "pmo", "scope", "scope-v0.1.md"),
+          "# Scope\n\n## Document Control\n\n| Status | DRAFT_CLIENT_REVIEW |\n")
+        self.assertTrue(guard.has_legacy_scope(root))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

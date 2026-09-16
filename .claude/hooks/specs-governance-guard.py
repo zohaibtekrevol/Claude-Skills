@@ -71,6 +71,26 @@ PMO-SPEC-018  PMO_STATE_MUTATION_INVALID      - spec generation changed protecte
 PMO-SPEC-019  PUBLISH_STATE_INVALID           - publishing attempted / claimed
                                                without a verified repository.
 PMO-SPEC-020  SPEC_GUARD_INTERNAL_ERROR       - unexpected exception; fail closed.
+PMO-SPEC-021  INTENT_NOT_READY               - (NEW lifecycle, no Scope
+                                               artifact exists) the canonical
+                                               Intent is absent, not
+                                               VALIDATED, lacks a matching PM
+                                               approval record, or its
+                                               project identity does not
+                                               match project-config.
+PMO-SPEC-022  QA_REGISTER_NOT_READY          - (NEW lifecycle) no canonical
+                                               Q&A register, or it is
+                                               structurally invalid.
+PMO-SPEC-023  QA_BLOCKING_ITEM_OPEN          - (NEW lifecycle) an unresolved
+                                               Blocking Q&A record remains.
+
+A project with at least one Scope artifact under docs/pmo/scope/ always uses
+the LEGACY entry gate (PMO-SPEC-001) and SCP-REQ-based traceability
+(PMO-SPEC-004/015), unchanged. A project with none uses the NEW entry gate
+(PMO-SPEC-021/022/023) and Intent/Q&A-based traceability. The framework
+never requires a new project to manufacture an empty Scope directory merely
+for compatibility; the path is selected deterministically by artifact
+presence, never by a project-config flag.
 
 Python 3, standard library only.
 """
@@ -82,6 +102,16 @@ import os
 import re
 import shlex
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+# Imported under its own namespace on purpose (see qa_register_core.py's own
+# module docstring for why `iac.*` / `qac.*`-style namespacing is used
+# throughout these guards instead of bare imports). The NEW-lifecycle
+# Specs-entry gate (PMO-SPEC-021/022/023) delegates entirely to this shared
+# module - this hook never re-implements Q&A validation.
+import qa_register_core as qac  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -115,9 +145,12 @@ FORBIDDEN_SPEC_BASENAME_RE = re.compile(
 
 REQUIRED_DOC_CONTROL = (
     "Project", "Client", "Project ID", "Spec Version", "Spec Status",
-    "Intent Version", "Scope Version", "Generated From", "Last Updated",
+    "Intent Version", "Generated From", "Last Updated",
     "Execution Authorized", "Repository",
 )
+# "Scope Version" is required only on the LEGACY (Scope-based) path - see
+# validate_required_sections(legacy_scope=...). The NEW (Intent + Q&A) path
+# has no Scope artifact to version.
 
 # (human name, heading regex, conditional?) - conditional sections are required
 # only when the corresponding content is present.
@@ -129,13 +162,16 @@ REQUIRED_SECTIONS = (
     ("Data Requirements", r"data\s+requirements", False),
     ("Integrations", r"integrations?", False),
     ("Open Questions", r"open\s+questions", False),
-    ("Scope -> Specs Traceability",
-     r"scope\s*(?:→|-+>|to)\s*specs?\s+traceability", False),
+    ("Scope/Intent -> Specs Traceability",
+     r"(?:scope|intent|requirements?)\s*(?:→|-+>|to)\s*specs?\s+traceability",
+     False),
     ("Specification Change History", r"specification\s+change\s+history", False),
     ("Validation Summary", r"validation\s+summary", False),
 )
 
-TRACE_HEADING_RE = r"scope\s*(?:→|-+>|to)\s*specs?\s+traceability"
+# Matches "Scope -> Specs Traceability" (LEGACY) as well as "Intent -> Specs
+# Traceability" / "Requirements -> Specs Traceability" (NEW lifecycle).
+TRACE_HEADING_RE = r"(?:scope|intent|requirements?)\s*(?:→|-+>|to)\s*specs?\s+traceability"
 HISTORY_HEADING_RE = r"specification\s+change\s+history"
 OPEN_HEADING_RE = r"open\s+questions"
 
@@ -149,19 +185,27 @@ FR_ACTIVE_LABELS = (
 FR_HISTORICAL_LABELS = (
     "Source Scope", "Introduced In", "Last Modified In", "Change Source", "Status",
 )
+# "Source Scope" is the mandatory upstream-traceability field on every FR/NFR
+# on BOTH paths. On the LEGACY path it carries SCP-REQ-* ids; on the NEW
+# (no-Scope) path the same mandatory field is written as "Source Requirement"
+# and carries INT-REQ-* / QST-* / ASM-* ids instead - a field-label alias,
+# not a schema fork. See validate_fr_structure / validate_reverse_traceability.
+FR_SOURCE_ALIASES = ("Source Scope", "Source Requirement")
 NFR_ACTIVE_LABELS = (
     "ID", "Title", "Category", "Requirement", "Introduced In", "Last Modified In",
     "Change Source", "Status",
 )
-NFR_SOURCE_ALIASES = ("Source Scope", "Source", "Evidence", "Source / Evidence")
+NFR_SOURCE_ALIASES = (
+    "Source Scope", "Source Requirement", "Source", "Evidence", "Source / Evidence",
+)
 NFR_CRITERIA_ALIASES = (
     "Acceptance Criteria", "Verification", "Verification Criteria",
     "Acceptance / Verification Criteria", "Acceptance / Verification",
 )
 
 PERMITTED_CHANGE_SOURCE_RE = re.compile(
-    r"^(?:INITIAL_SCOPE|SCOPE[-_]RECONCILIATION|PM[-_]DECISION"
-    r"|FDB-\d+|CR-\d+"
+    r"^(?:INITIAL_SCOPE|INITIAL_INTENT|SCOPE[-_]RECONCILIATION|PM[-_]DECISION"
+    r"|FDB-\d+|CR-\d+|QST-\d+|ASM-\d+"
     r"|SCOPE\s*V?\d+(?:\.\d+)*(?:\s*\([^)]*\))?)$",
     re.IGNORECASE,
 )
@@ -619,6 +663,46 @@ def validate_scope_readiness(root):
 
 
 # --------------------------------------------------------------------------- #
+# PMO-SPEC-021/022/023  NEW (no-Scope) lifecycle Specs-entry readiness
+# --------------------------------------------------------------------------- #
+
+def has_legacy_scope(root):
+    """True when the project has at least one docs/pmo/scope/scope-vX.Y.md
+    artifact - the sole, deterministic signal that selects the LEGACY entry
+    gate/traceability model over the NEW (Intent + Q&A) one. Never a
+    project-config flag; never inferred from workflow.current_stage."""
+    return bool(all_scope_artifacts(root))
+
+
+def read_intent_requirements(root):
+    """Set of active INT-REQ ids defined as table rows in intent.md - the
+    NEW-lifecycle traceability anchor, identical in shape to
+    scope-version-guard.py's same-named helper for Scope."""
+    text = read_text(os.path.join(root, INTENT_RELPATH)) or ""
+    return set(re.findall(r"(?m)^\|\s*(INT-REQ-\d+)\s*\|", text))
+
+
+def validate_new_lifecycle_readiness(root):
+    """The NEW (no-Scope) lifecycle Specs-entry gate: canonical Intent
+    VALIDATED + matching PM approval + identity match, a structurally valid
+    canonical Q&A register, and no unresolved Blocking Q&A record. Reads the
+    canonical Intent, approval record and Q&A register directly - never a
+    project-config boolean - by delegating entirely to
+    `qa_register_core.validate_new_path_readiness`; this hook never
+    re-implements Q&A validation."""
+    result = qac.validate_new_path_readiness(root)
+    if result is None:
+        return None
+    kind, message = result
+    code = {
+        "INTENT_NOT_READY": "PMO-SPEC-021",
+        "QA_REGISTER_NOT_READY": "PMO-SPEC-022",
+        "QA_BLOCKING_ITEM_OPEN": "PMO-SPEC-023",
+    }.get(kind, "PMO-SPEC-021")
+    return deny(code, message)
+
+
+# --------------------------------------------------------------------------- #
 # PMO-SPEC-002  canonical path
 # --------------------------------------------------------------------------- #
 
@@ -646,10 +730,12 @@ def validate_canonical_path(rel_posix):
 # PMO-SPEC-003  schema / required sections
 # --------------------------------------------------------------------------- #
 
-def validate_required_sections(spec_text, meta=None):
+def validate_required_sections(spec_text, meta=None, legacy_scope=True):
     meta = meta if meta is not None else parse_spec_metadata(spec_text)
     missing_dc = [lbl for lbl in REQUIRED_DOC_CONTROL
                   if _field(spec_text, lbl) in (None, "")]
+    if legacy_scope and _field(spec_text, "Scope Version") in (None, ""):
+        missing_dc.append("Scope Version")
     if missing_dc:
         return deny(
             "PMO-SPEC-003",
@@ -675,43 +761,51 @@ def validate_required_sections(spec_text, meta=None):
 
 
 # --------------------------------------------------------------------------- #
-# PMO-SPEC-004  Scope -> Specs traceability (forward)
+# PMO-SPEC-004  Scope/Intent -> Specs traceability (forward)
 # --------------------------------------------------------------------------- #
 
-def validate_scope_traceability(scope_req_ids, spec_text):
+def validate_requirement_traceability(req_ids, spec_text, id_regex=r"SCP-REQ-\d+",
+                                      req_label="Scope requirement",
+                                      matrix_label="Scope -> Specs"):
+    """Generalized forward-traceability check. LEGACY path calls this with
+    SCP-REQ ids (`validate_scope_traceability`); NEW (no-Scope) lifecycle
+    calls it with INT-REQ ids (`validate_intent_traceability_specs`). Same
+    rule either way: every active upstream requirement must appear, exactly
+    once, with a valid coverage disposition."""
     tbl = _table_after(spec_text, TRACE_HEADING_RE)
     if tbl is None:
         return deny(
             "PMO-SPEC-004",
-            "no Scope -> Specs Traceability matrix found; every active SCP-REQ "
-            "must have a disposition.",
+            "no {} Traceability matrix found; every active {} must have a "
+            "disposition.".format(matrix_label, req_label),
         )
     header, rows = tbl
     cov_idx = _col_index(header, "coverage", "disposition", "status")
     seen = {}
     bad_cov = []
+    id_re = re.compile(id_regex)
     for row in rows:
         if not row:
             continue
-        for cid in re.findall(r"SCP-REQ-\d+", row[0]):
+        for cid in id_re.findall(row[0]):
             seen[cid] = seen.get(cid, 0) + 1
         if cov_idx is not None and cov_idx < len(row):
             cov = norm_token(row[cov_idx])
             if cov and cov not in VALID_COVERAGE:
                 bad_cov.append(row[cov_idx])
-    missing = sorted(set(scope_req_ids) - set(seen))
+    missing = sorted(set(req_ids) - set(seen))
     dupes = sorted(k for k, v in seen.items() if v > 1)
     if missing:
         return deny(
             "PMO-SPEC-004",
-            "active Scope requirement(s) absent from the Scope -> Specs "
-            "Traceability matrix: {}.".format(", ".join(missing)),
+            "active {}(s) absent from the {} Traceability matrix: {}.".format(
+                req_label, matrix_label, ", ".join(missing)),
         )
     if dupes:
         return deny(
             "PMO-SPEC-004",
-            "Scope requirement(s) appear in more than one traceability row "
-            "(exactly one disposition each): {}.".format(", ".join(dupes)),
+            "{}(s) appear in more than one traceability row (exactly one "
+            "disposition each): {}.".format(req_label, ", ".join(dupes)),
         )
     if bad_cov:
         return deny(
@@ -720,6 +814,21 @@ def validate_scope_traceability(scope_req_ids, spec_text):
                 ", ".join(sorted(set(bad_cov))), ", ".join(sorted(VALID_COVERAGE))),
         )
     return None
+
+
+def validate_scope_traceability(scope_req_ids, spec_text):
+    """LEGACY path - unchanged behavior, SCP-REQ ids."""
+    return validate_requirement_traceability(
+        scope_req_ids, spec_text, id_regex=r"SCP-REQ-\d+",
+        req_label="Scope requirement", matrix_label="Scope -> Specs")
+
+
+def validate_intent_traceability_specs(intent_req_ids, spec_text):
+    """NEW (no-Scope) lifecycle path - INT-REQ ids, no Scope artifact
+    required or consulted."""
+    return validate_requirement_traceability(
+        intent_req_ids, spec_text, id_regex=r"INT-REQ-\d+",
+        req_label="Intent requirement", matrix_label="Intent -> Specs")
 
 
 # --------------------------------------------------------------------------- #
@@ -1033,12 +1142,13 @@ def parse_nfr_definitions(spec_text):
 def _requirement_identity_map(blocks):
     out = {}
     for rid, block in blocks.items():
+        source_text = _nfr_field(block, FR_SOURCE_ALIASES) or ""
         out[rid] = {
             "status": _field(block, "Status"),
             "title": _field(block, "Title"),
             "requirement": _field(block, "Requirement"),
             "source_scope": set(re.findall(
-                r"SCP-REQ-\d+", _field(block, "Source Scope") or "")),
+                r"SCP-REQ-\d+|INT-REQ-\d+", source_text)),
         }
     return out
 
@@ -1054,6 +1164,14 @@ def validate_fr_structure(fr_blocks):
             )
         if status == "ACTIVE":
             for label in FR_ACTIVE_LABELS:
+                if label == "Source Scope":
+                    if _nfr_field(block, FR_SOURCE_ALIASES) is None:
+                        return deny(
+                            "PMO-SPEC-010",
+                            "active {} is missing a Source Scope / Source "
+                            "Requirement reference.".format(rid),
+                        )
+                    continue
                 val = _field(block, label)
                 if val is None:
                     return deny(
@@ -1070,6 +1188,14 @@ def validate_fr_structure(fr_blocks):
                 )
         else:
             for label in FR_HISTORICAL_LABELS:
+                if label == "Source Scope":
+                    if _nfr_field(block, FR_SOURCE_ALIASES) is None:
+                        return deny(
+                            "PMO-SPEC-010",
+                            "{} ({}) must retain a historical Source Scope / "
+                            "Source Requirement reference.".format(rid, status),
+                        )
+                    continue
                 if _field(block, label) is None:
                     return deny(
                         "PMO-SPEC-010",
@@ -1210,7 +1336,8 @@ def validate_change_history(cur_ver, spec_text, rows=None):
         )
     if cur_ver == (0, 1):
         blob = (cur_rows[0][2] + " " + cur_rows[0][4]).lower()
-        if not re.search(r"initial_scope|initial\s+scope|scope\s*v?0\.1", blob):
+        if not re.search(r"initial_scope|initial\s+scope|scope\s*v?0\.1"
+                         r"|initial_intent|initial\s+intent", blob):
             return deny(
                 "PMO-SPEC-013",
                 "the initial (0.1) Specification Change History row must record "
@@ -1311,28 +1438,35 @@ def validate_change_provenance(fr_blocks, nfr_blocks, feedback_ids=None,
 # PMO-SPEC-015  reverse traceability (no unapproved Scope expansion)
 # --------------------------------------------------------------------------- #
 
-def validate_reverse_traceability(fr_blocks, nfr_blocks, scope_req_ids):
-    scope_req_ids = set(scope_req_ids or ())
+def validate_reverse_traceability(fr_blocks, nfr_blocks, req_ids):
+    """req_ids is the current upstream requirement set - SCP-REQ ids on the
+    LEGACY path, INT-REQ ids on the NEW (no-Scope) lifecycle path. Either
+    way, every active FR/NFR needs a Source Scope / Source Requirement trace
+    into that set, or an approved change origin."""
+    req_ids = set(req_ids or ())
     both = {}
     both.update(fr_blocks or {})
     both.update(nfr_blocks or {})
     for rid, block in both.items():
         if norm_token(_field(block, "Status")) != "ACTIVE":
             continue
-        src = (_field(block, "Source Scope") or _field(block, "Source")
-               or _field(block, "Evidence") or "")
-        scope_refs = set(re.findall(r"SCP-REQ-\d+", src))
+        src = (_field(block, "Source Scope") or _field(block, "Source Requirement")
+               or _field(block, "Source") or _field(block, "Evidence") or "")
+        src_refs = set(re.findall(r"SCP-REQ-\d+|INT-REQ-\d+", src))
         cs = _field(block, "Change Source") or ""
         approved_origin = bool(re.search(
-            r"\b(?:CR-\d+|PM[-_]DECISION|SCOPE[-_]RECONCILIATION|FDB-\d+)\b",
+            r"\b(?:CR-\d+|PM[-_]DECISION|SCOPE[-_]RECONCILIATION|FDB-\d+"
+            r"|QST-\d+|ASM-\d+)\b",
             cs, re.I))
-        if not (scope_refs & scope_req_ids) and not approved_origin:
+        if not (src_refs & req_ids) and not approved_origin:
             return deny(
                 "PMO-SPEC-015",
-                "active {} has neither Scope traceability (a Source Scope "
-                "SCP-REQ in the current Scope) nor an approved change origin "
-                "(CR / PM-DECISION / SCOPE-RECONCILIATION / FDB); Specs must "
-                "not silently introduce functionality beyond Scope.".format(rid),
+                "active {} has neither upstream traceability (a Source Scope "
+                "/ Source Requirement reference in the current Scope or "
+                "Intent) nor an approved change origin (CR / PM-DECISION / "
+                "SCOPE-RECONCILIATION / FDB / QST / ASM); Specs must not "
+                "silently introduce functionality beyond what was "
+                "committed.".format(rid),
             )
     return None
 
@@ -1529,13 +1663,16 @@ def full_spec_validation(root, spec_text=None):
                     CANONICAL_SPEC_POSIX),
             )
 
-        d = validate_scope_readiness(root)
+        legacy = has_legacy_scope(root)
+
+        d = validate_scope_readiness(root) if legacy \
+            else validate_new_lifecycle_readiness(root)
         if d is not None:
             return d
 
         meta = parse_spec_metadata(spec_text)
 
-        d = validate_required_sections(spec_text, meta)
+        d = validate_required_sections(spec_text, meta, legacy_scope=legacy)
         if d is not None:
             return d
 
@@ -1596,14 +1733,18 @@ def full_spec_validation(root, spec_text=None):
         if d is not None:
             return d
 
-        sc_path, _ = locate_current_scope(root)
-        scope_ids = read_scope_requirements(read_text(sc_path) or "") \
-            if sc_path else set()
-        d = validate_scope_traceability(scope_ids, spec_text)
+        if legacy:
+            sc_path, _ = locate_current_scope(root)
+            req_ids = read_scope_requirements(read_text(sc_path) or "") \
+                if sc_path else set()
+            d = validate_scope_traceability(req_ids, spec_text)
+        else:
+            req_ids = read_intent_requirements(root)
+            d = validate_intent_traceability_specs(req_ids, spec_text)
         if d is not None:
             return d
 
-        d = validate_reverse_traceability(fr_blocks, nfr_blocks, scope_ids)
+        d = validate_reverse_traceability(fr_blocks, nfr_blocks, req_ids)
         if d is not None:
             return d
 

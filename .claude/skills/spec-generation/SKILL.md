@@ -1,39 +1,53 @@
 ---
 name: spec-generation
 description: >-
-  Convert the current PM-reviewed PMO Scope into the canonical engineering and
-  QA execution artifact docs/pmo/specs/specs.md — the single execution source of
-  truth consumed by Development and QA. Intent stays the contextual source of
-  truth (WHY); Scope stays the commercial / product-boundary source of truth
-  (WHAT committed); specs.md is the EXACT operational behaviour Dev must build
-  and QA must verify, so that normal execution never has to reinterpret
-  contracts, transcripts, emails, feedback sheets or earlier Scope versions.
-  Runs immediately after the first PM-reviewed Scope draft exists — Scope v0.1
-  (DRAFT_CLIENT_REVIEW) → specs.md Spec Version 0.1, Spec Status PROVISIONAL,
-  Execution Authorized false — and does NOT wait for Scope v1.0 approval; Scope
-  review and provisional Specs coexist. The live path is always
-  docs/pmo/specs/specs.md (never specs-v0.1.md / specs-v0.2.md); logical version
-  lives in the Spec Version metadata and the Specification Change History table
-  inside the file, plus git history and Feedback / CR provenance. Produces
-  Specification Document Control, FR-XXX functional requirements (permanent IDs,
-  full behavioural structure, Given/When/Then acceptance criteria), NFR-XXX
-  non-functional requirements (evidence-supported only, no invented
-  thresholds), BR-XXX business rules, system-state models, business-level
-  error / exception behaviour, behavioural data requirements, INTG-XXX → FR/NFR
-  integration mapping, preserved OPEN-XXX / SCP-OPEN-XXX / BRAND-OPEN-XXX items
-  (new spec-level questions become SPEC-OPEN-XXX), a Scope → Specs traceability
-  matrix covering every active SCP-REQ, and an Intent → Scope → Specs lineage.
-  Never adds a requirement absent from Scope (it flags instead), never
-  renumbers or reuses FR/NFR IDs, never silently resolves an OPEN item, never
-  infers ACTIVE status or flips Execution Authorized automatically, and never
-  modifies Intent, Scope, source evidence, feedback or CR sources. Feedback that
-  does not move the commercial boundary updates specs.md only (Spec Version
-  bump, Feedback ID recorded); commercial-boundary changes and approved CRs
-  update Scope too. PMO-SPEC-001 … PMO-SPEC-010 define deterministic halt
-  behaviour; publishing uses only the repository configured in
-  .pmo/project-config.yaml, never bypasses repo-binding-guard.py, and reports
-  PUBLISH_BLOCKED_REPOSITORY_NOT_VERIFIED rather than pushing elsewhere.
-  Emits a final PMO SPEC GENERATION RESULT report.
+  Convert the current PMO commercial/product basis into the canonical
+  engineering and QA execution artifact docs/pmo/specs/specs.md — the single
+  execution source of truth consumed by Development and QA. TWO entry paths,
+  selected deterministically by whether the project has a Scope artifact
+  under docs/pmo/scope/ — never by a project-config flag, and a new project
+  is never required to manufacture an empty Scope for compatibility. LEGACY
+  path (a Scope artifact exists): unchanged — Intent stays the contextual
+  source of truth (WHY); Scope stays the commercial/product-boundary source
+  of truth (WHAT committed); runs immediately after the first PM-reviewed
+  Scope draft exists, SCP-REQ traceability, PMO-SPEC-001/004/015. NEW path
+  (no Scope artifact — the active lifecycle for a new project): runs once
+  Intent is VALIDATED with a matching PM approval AND the canonical Q&A
+  register (docs/pmo/requirements/questions-and-assumptions.md) has no
+  unresolved Blocking record — PMO-SPEC-021/022/023 — with traceability
+  against Intent INT-REQ ids instead of Scope SCP-REQ ids ("Source
+  Requirement" / "Intent → Specs Traceability"), reading Intent + Q&A
+  directly, never a project-config boolean. specs.md is the EXACT
+  operational behaviour Dev must build and QA must verify either way, so
+  normal execution never has to reinterpret contracts, transcripts, emails,
+  feedback sheets, earlier Scope versions or the Q&A register itself. The
+  live path is always docs/pmo/specs/specs.md (never specs-v0.1.md /
+  specs-v0.2.md); logical version lives in the Spec Version metadata and the
+  Specification Change History table inside the file, plus git history and
+  Feedback / CR provenance. Produces Specification Document Control, FR-XXX
+  functional requirements (permanent IDs, full behavioural structure,
+  Given/When/Then acceptance criteria), NFR-XXX non-functional requirements
+  (evidence-supported only, no invented thresholds), BR-XXX business rules,
+  system-state models, business-level error / exception behaviour,
+  behavioural data requirements, INTG-XXX → FR/NFR integration mapping,
+  preserved OPEN-XXX / SCP-OPEN-XXX / BRAND-OPEN-XXX / QST-XXX / ASM-XXX
+  items (new spec-level questions become SPEC-OPEN-XXX), a Scope → Specs (or
+  Intent → Specs) traceability matrix covering every active upstream
+  requirement, and an upstream lineage table. Never adds a requirement
+  absent from its upstream basis (it flags instead), never renumbers or
+  reuses FR/NFR IDs, never silently resolves an OPEN item, never infers
+  ACTIVE status or flips Execution Authorized automatically, and never
+  modifies Intent, Scope, the Q&A register, source evidence, feedback or CR
+  sources. Feedback that does not move the commercial boundary updates
+  specs.md only (Spec Version bump, Feedback ID recorded); commercial-
+  boundary changes and approved CRs update specs.md (+ Scope on the LEGACY
+  path) plus the Change Log. A post-baseline Q&A resolution that materially
+  changes approved functionality must not bypass CR governance either.
+  PMO-SPEC-001 … PMO-SPEC-023 define deterministic halt behaviour;
+  publishing uses only the repository configured in
+  .pmo/project-config.yaml, never bypasses repo-binding-guard.py, and
+  reports PUBLISH_BLOCKED_REPOSITORY_NOT_VERIFIED rather than pushing
+  elsewhere. Emits a final PMO SPEC GENERATION RESULT report.
 ---
 
 # Specification Generation (PMO)
@@ -85,6 +99,64 @@ Consequences:
   only in an upstream source, it is either brought into `specs.md` **with a
   Scope trace**, or (when Scope does not support it) **flagged** — never
   silently added (Section 6).
+
+This table describes the **LEGACY** path (a project that already has a Scope
+lineage). See Section 2a for the **NEW** (no-Scope) path's source-of-truth
+model, which most new projects now use.
+
+---
+
+## 2a. NEW (no-Scope) lifecycle — entry contract and source-of-truth model
+
+**Path selection is deterministic and never a flag.** A project with at
+least one `docs/pmo/scope/scope-vX.Y.md` artifact is on the LEGACY path
+(Section 2, unchanged in every respect). A project with **none** is on this
+NEW path. Nothing in `.pmo/project-config.yaml` selects the path, and a new
+project is never required to manufacture an empty Scope directory merely for
+compatibility — `.claude/hooks/specs-governance-guard.py`'s
+`has_legacy_scope(root)` makes this determination by listing
+`docs/pmo/scope/`, nothing else.
+
+| Artifact | Role | Question it answers |
+|---|---|---|
+| `docs/pmo/intent/intent.md` | Contextual **and** commercial/product-boundary source of truth | **WHY**, and **WHAT** was already confirmed at Intent validation |
+| `docs/pmo/requirements/questions-and-assumptions.md` | Resolved-matters register | which remaining ambiguities/assumptions were closed, by whom, and how |
+| `docs/pmo/specs/specs.md` | Execution source of truth | **EXACT operational behaviour** Dev builds / QA verifies |
+
+There is **no mandatory Scope artifact** in this model. `specs.md` traces
+directly to Intent `INT-REQ-*` (never `SCP-REQ-*`) and, where a requirement's
+shape was set by a Q&A resolution rather than being already explicit in
+Intent, to the resolving `QST-*` / `ASM-*` record.
+
+**Entry preconditions — all required, checked by reading the canonical
+artifacts directly (never a project-config boolean):**
+
+1. `docs/pmo/intent/intent.md` exists with `Status: VALIDATED`.
+2. A structurally valid, matching PM approval record exists at
+   `.pmo/approvals/intent-approval.yaml` (identical rule to the LEGACY
+   path's Scope-entry prerequisite — reused unchanged via
+   `intent_approval_core.py`).
+3. The Intent's project identity matches `.pmo/project-config.yaml`.
+4. `docs/pmo/requirements/questions-and-assumptions.md` exists.
+5. The Q&A register is structurally valid (every record: valid `Type`,
+   valid `Status`, explicit `Blocking`, required fields present — see
+   `requirement-gathering`'s own governance, which this stage never
+   re-implements, only consults).
+6. No record remains `Status: OPEN` with `Blocking: YES`.
+7. `docs/pmo/sources/` remains available for ambiguity consultation, exactly
+   as on the LEGACY path (Section 6).
+
+A `DEFERRED` / `NON_BLOCKING` Q&A record does **not** block entry — its
+`Specs Impact` field is exactly how that still-open decision stays
+traceable inside `specs.md` (an explicit `SPEC-OPEN-*` / TBD note on the
+affected FR/NFR), never a silently dropped question. Preconditions 1–6 are
+enforced deterministically as `PMO-SPEC-021` (Intent), `PMO-SPEC-022`
+(Q&A register missing/invalid) and `PMO-SPEC-023` (a Blocking record
+remains) — see Section 26.
+
+**Specs generation on this path never requires, checks or references:**
+Scope existence, Scope approval, a Scope version, or any
+`workflow.scope.*` / `artifacts.scope.*` project-config field.
 
 ---
 
@@ -141,9 +213,10 @@ The path stays stable across every version.
 
 | Input | Use |
 |---|---|
-| `.pmo/project-config.yaml` | project identity, repository, artifact state, workflow state |
-| `docs/pmo/intent/intent.md` | contextual traceability (INT-REQ), ambiguity validation |
-| current Scope artifact under `docs/pmo/scope/` | **primary** generation source — the most recent PM-reviewed Scope draft |
+| `.pmo/project-config.yaml` | project identity, repository, artifact state, workflow state (never an authorization source — Section 2a) |
+| `docs/pmo/intent/intent.md` | LEGACY: contextual traceability (INT-REQ), ambiguity validation. NEW path: **primary** generation source (WHY + WHAT already confirmed). |
+| current Scope artifact under `docs/pmo/scope/`, **when one exists** | LEGACY path only — **primary** generation source, the most recent PM-reviewed Scope draft. Absent entirely on the NEW path (Section 2a) — its absence is not an error. |
+| `docs/pmo/requirements/questions-and-assumptions.md`, **when the project has no Scope** | NEW path only — resolved Q&A basis; required (`PMO-SPEC-022`). |
 | relevant approved decisions under `docs/pmo/decisions/` where available | resolved questions that constrain behaviour |
 
 **Also read for an UPDATE operation:**
@@ -161,7 +234,7 @@ needed input is missing or unreadable → `PMO-SPEC-002`, `STOP` (Section 26).
 
 ## 6. Initial-generation source discipline
 
-For the **initial** `specs.md`:
+For the **initial** `specs.md` on the **LEGACY** path (a Scope artifact exists):
 
 - **Primary source:** the current **PM-reviewed Scope**.
 - **Supporting traceability source:** the **validated Intent** (for INT-REQ
@@ -179,13 +252,29 @@ represent:
 - route it back to Requirement Gathering (owning workflow for a Scope defect);
 - **do not** insert it into an FR as committed functionality.
 
-Unsourced FR/NFR content is `PMO-SPEC-005` (Section 26).
+For the **initial** `specs.md` on the **NEW** (no-Scope) path (Section 2a):
+
+- **Primary source:** the **validated Intent** (`INT-REQ-*` and its already-
+  confirmed detail) **plus** the resolved/deferred/non-blocking records in
+  the Q&A register.
+- **Original evidence** under `docs/pmo/sources/` may be **consulted only to
+  validate ambiguity** — never as a primary requirement source, exactly as
+  on the LEGACY path.
+- **Do not silently introduce a requirement that neither Intent nor a
+  resolved Q&A record supports.** If consulted evidence appears to require
+  functionality neither represents, record it as `SPEC-OPEN-XXX` and route
+  it back to `requirement-gathering` (a new Q&A record) — do not insert it
+  into an FR as committed functionality, and do not invent a Scope defect
+  report that names an artifact this path does not use.
+
+Unsourced FR/NFR content is `PMO-SPEC-005` (Section 26) on either path.
 
 ---
 
 ## 7. Specification Document Control
 
-`specs.md` **must** begin with a Document Control block carrying at least:
+`specs.md` **must** begin with a Document Control block. On the **LEGACY**
+path:
 
 ```
 Project:              <project.name>
@@ -201,10 +290,33 @@ Execution Authorized: true | false
 Repository:           <repository configured in .pmo/project-config.yaml>
 ```
 
+On the **NEW** (no-Scope) path (Section 2a), `Scope Version` is **omitted
+entirely** — it is not required and must not be fabricated as `N/A` filler;
+`Generated From` instead names the Q&A register (and/or the Intent):
+
+```
+Project:              <project.name>
+Client:               <project.client>
+Project ID:           <project.id>
+Spec Version:         <version>            e.g. 0.1
+Spec Status:          <status>             PROVISIONAL | ACTIVE
+Intent Version:       <intent version>
+Generated From:       docs/pmo/requirements/questions-and-assumptions.md
+Last Updated:         <UTC ISO-8601 timestamp>
+Execution Authorized: true | false
+Repository:           <repository configured in .pmo/project-config.yaml>
+```
+
 All identity values (`Project`, `Client`, `Project ID`, `Repository`) are taken
 **verbatim from `.pmo/project-config.yaml`**, never from conversation history. A
-mismatch between Scope Document Control and `project-config` identity is
-`PMO-SPEC-003`.
+mismatch between Specification Document Control and `project-config` identity is
+`PMO-SPEC-003` / `PMO-SPEC-016`.
+
+**Field alias on both paths:** every FR/NFR's mandatory upstream-trace field
+is written as `Source Scope` on the LEGACY path (carrying `SCP-REQ-*` ids) or
+as `Source Requirement` on the NEW path (carrying `INT-REQ-*` and/or `QST-*`
+/ `ASM-*` ids) — the same mandatory field under a path-appropriate label, not
+two different schemas (Section 12).
 
 ---
 
@@ -315,6 +427,10 @@ Status:                   ACTIVE | DEFERRED | RETIRED
   omit behavioural detail that no longer applies but must keep `Source Scope`,
   `Introduced In`, `Last Modified In`, `Change Source` and a reason.
 - `Module`, `Actor(s)`, `Source Scope` are mandatory for every active FR.
+- **NEW (no-Scope) path:** write `Source Requirement` in place of
+  `Source Scope`, carrying `INT-REQ-*` and/or `QST-*` / `ASM-*` ids — the
+  same mandatory field under its path-appropriate label (Section 7). Do not
+  write both.
 
 ---
 
@@ -436,7 +552,8 @@ unless requirements explicitly demand them.
 
 ### 19.3 Traceability
 
-`specs.md` **must** contain a **Scope → Specs Traceability** matrix:
+**LEGACY path:** `specs.md` **must** contain a **Scope → Specs Traceability**
+matrix:
 
 ```
 | Scope ID | FR/NFR IDs | Coverage | Notes |
@@ -452,6 +569,24 @@ unless requirements explicitly demand them.
   `SPEC-OPEN` item that blocks full coverage.
 - Also maintain an **Intent → Scope → Specs** lineage table where it adds value
   for complete traceability (INT-REQ → SCP-REQ → FR/NFR).
+
+**NEW (no-Scope) path:** `specs.md` **must** contain an **Intent → Specs
+Traceability** matrix instead (same heading pattern, `scope`/`intent`/
+`requirements` are all recognised — Section 2a):
+
+```
+| Requirement ID | FR/NFR IDs | Coverage | Notes |
+|---|---|---|---|
+```
+
+- **Every active `INT-REQ` must appear** with a coverage value — the direct
+  analogue of `PMO-SPEC-004` for this path, checked against `intent.md`
+  instead of a Scope artifact.
+- `PARTIALLY_COVERED` / `OPEN` rows name the `QST-*` / `ASM-*` /
+  `SPEC-OPEN-*` item that blocks full coverage.
+- A row may also cite a resolving `QST-*` / `ASM-*` id directly where a
+  requirement's exact shape came from a Q&A resolution rather than being
+  already explicit in Intent.
 
 ---
 
@@ -605,6 +740,11 @@ inputs. Open every source **read-only** for the whole run; keep the exact
 `.pmo/project-config.yaml` text for the Phase 5 no-collateral-change check.
 
 ### Phase 1 — Pre-generation validation
+First determine the path (Section 2a): **LEGACY** if `docs/pmo/scope/`
+contains at least one `scope-vX.Y.md`, else **NEW**. Never a project-config
+flag.
+
+**LEGACY path:**
 - `PMO-SPEC-001` — a current Scope artifact exists under `docs/pmo/scope/` and
   is at least **PM-reviewed** (`workflow.scope.pm_review: COMPLETE` or an
   equivalent recorded signal). A pre-PM-review Scope does not authorise Specs.
@@ -616,20 +756,37 @@ inputs. Open every source **read-only** for the whole run; keep the exact
   `PROVISIONAL` unless an approved Scope baseline exists **and** a PM has set
   `ACTIVE`).
 
+**NEW (no-Scope) path (Section 2a):**
+- `PMO-SPEC-021` — canonical Intent VALIDATED + matching PM approval +
+  identity match (read directly, never a project-config boolean).
+- `PMO-SPEC-022` — the canonical Q&A register exists and is structurally
+  valid.
+- `PMO-SPEC-023` — no Q&A record remains `OPEN` with `Blocking: YES`.
+- `PMO-SPEC-002` / `PMO-SPEC-003` apply identically (input readability,
+  Specification identity match).
+- Spec Status is `PROVISIONAL` for every initial NEW-path baseline; the
+  `ACTIVE` / Version `1.0` promotion tied to an approved Scope baseline
+  (Section 8, Section 10) is a LEGACY-path-only concept — promoting a
+  NEW-path baseline past `PROVISIONAL` is Change-Request-governance
+  territory, not addressed by this phase.
+
 ### Phase 2 — Build the specification model
 FRs (Section 12), NFRs (Section 14), BRs (Section 15), system states
 (Section 16), error / exception behaviour (Section 17), data requirements
 (Section 18), integration map (Section 19.1), OPEN carry-forward (Section 19.2).
-Primary source = PM-reviewed Scope; Intent for lineage; original evidence only
-to validate ambiguity (Section 6).
+LEGACY: primary source = PM-reviewed Scope, Intent for lineage. NEW: primary
+source = validated Intent + resolved Q&A. Original evidence only to validate
+ambiguity either way (Section 6).
 
 ### Phase 3 — Coverage & consistency validation
-- `PMO-SPEC-004` — every **active** `SCP-REQ` appears in the Scope → Specs
-  matrix with a coverage value; nothing dropped silently.
-- `PMO-SPEC-005` — every FR / NFR traces to a Scope ID (and/or Intent ID / CR /
-  PM-DECISION); no requirement is introduced that Scope does not support
-  (otherwise `SPEC-OPEN` + `SCOPE_GAP_SUSPECTED` + route to Requirement
-  Gathering; do not embed it).
+- `PMO-SPEC-004` — every **active** upstream requirement (`SCP-REQ` on
+  LEGACY, `INT-REQ` on NEW) appears in the traceability matrix with a
+  coverage value; nothing dropped silently.
+- `PMO-SPEC-005` — every FR / NFR traces to an upstream ID (and/or CR /
+  PM-DECISION / a resolved `QST-*` / `ASM-*`); no requirement is introduced
+  that its upstream basis does not support (otherwise `SPEC-OPEN` +
+  `SCOPE_GAP_SUSPECTED` / a new Q&A record + route back to the owning
+  workflow; do not embed it).
 - `PMO-SPEC-006` — FR / NFR / BR IDs are permanent: no renumber, no reuse, no
   re-prefix vs the existing `specs.md`.
 - `PMO-SPEC-007` — no `OPEN` / `SCP-OPEN` / `BRAND-OPEN` item is silently
@@ -678,6 +835,16 @@ usable; report and route.
 | `PMO-SPEC-008` | `VERSION_OR_STATUS_VIOLATION` | Illegal version progression (skip / repeat / regress, or `1.0` without an approved Scope baseline), or `ACTIVE` inferred automatically. | Set the correct next version; keep `PROVISIONAL` until a PM sets `ACTIVE` against a v1.0+ baseline. |
 | `PMO-SPEC-009` | `EXECUTION_AUTH_AUTO_CHANGE` | `Execution Authorized` changed as a side effect of generating, updating, exporting or publishing. | Restore the prior value; change it only on an explicit PM-DECISION row. |
 | `PMO-SPEC-010` | `SPEC_INTERNAL_ERROR` | Unexpected exception during a controlled step. | Fail closed — never present a partially-generated `specs.md`; fix and re-run. |
+| `PMO-SPEC-021` | `INTENT_NOT_READY` | **NEW (no-Scope) path only.** The canonical Intent is absent, not VALIDATED, lacks a matching PM approval record, or its identity does not match project-config. | Complete Intent validation + PM approval first (Section 2a); re-run. |
+| `PMO-SPEC-022` | `QA_REGISTER_NOT_READY` | **NEW path only.** No canonical Q&A register at `docs/pmo/requirements/questions-and-assumptions.md`, or it is structurally invalid. | Run `requirement-gathering` first, or fix the register's structural defect; re-run. |
+| `PMO-SPEC-023` | `QA_BLOCKING_ITEM_OPEN` | **NEW path only.** At least one Q&A record remains `Status: OPEN` with `Blocking: YES`. | Resolve the blocking item(s) via `requirement-gathering`'s governed record-update flow; re-run. |
+
+These three codes are installed identically in
+`.claude/hooks/specs-governance-guard.py` (`validate_new_lifecycle_readiness`,
+delegating to `qa_register_core.validate_new_path_readiness`) and never fire
+on the LEGACY path; `PMO-SPEC-001` never fires on the NEW path. Path
+selection is `has_legacy_scope(root)` — Scope-artifact presence, checked
+directly, never a project-config flag (Section 2a).
 
 **Routing outcome.** When upstream content looks wrong (a Scope contradiction, a
 mislabelled status, an OPEN item the evidence clearly answers, an identifier
@@ -708,6 +875,10 @@ Spec Generation **must not** modify:
 
 - the validated Intent;
 - any existing Scope artifact;
+- the Q&A register (`docs/pmo/requirements/questions-and-assumptions.md`) —
+  read it, never write it; a discovered gap routes back to
+  `requirement-gathering` as a new record, exactly as a Scope gap routes
+  back to Requirement Gathering on the LEGACY path;
 - source evidence (contract, transcript, email, proposal, decision records);
 - feedback source files;
 - Change-Request source files;
@@ -770,6 +941,16 @@ route it back, `STOP`.
 - MUST NOT publish to, or fall back to, any repository other than the one
   configured in `project-config` (Section 28).
 - MUST NOT rely on conversation memory as authoritative evidence (Section 5).
+- MUST NOT authorise NEW-path entry from a project-config boolean — always
+  re-read the canonical Intent, approval record and Q&A register directly
+  (Section 2a).
+- MUST NOT require, check, or fabricate a Scope artifact/version on the NEW
+  (no-Scope) path (Section 2a).
+- MUST NOT let a post-baseline Q&A resolution bypass Change Request
+  governance merely because it happens to close a `QST-*` / `ASM-*` record —
+  a resolution that materially changes an already-approved Specs baseline
+  still requires CR governance, exactly as an equivalent post-baseline Scope
+  change would (Section 21.3).
 - MUST NOT commit or push unless explicitly asked.
 
 ---
