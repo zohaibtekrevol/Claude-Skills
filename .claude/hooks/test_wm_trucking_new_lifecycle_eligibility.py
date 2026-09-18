@@ -89,12 +89,24 @@ class WmTruckingNewLifecycleEligibilityTests(unittest.TestCase):
             "This eligibility check is read-only and must never modify "
             "the real Q&A register.")
 
-    def test_no_specs_created_by_this_check(self):
+    def test_specs_this_check_never_modifies_it(self):
+        """WM Trucking's initial Specs baseline is a real, separately
+        governed PMO artifact (spec-generation's own deliverable, produced
+        under the INITIAL_SPECS_CREATION authorization path) - this test
+        only reads it, byte-for-byte, and never writes it. It intentionally
+        does not assert on Spec Status / Execution Authorized here (that is
+        pmo_lifecycle_core's / specs-governance-guard.py's own job) - only
+        that this read-only eligibility check never touches it."""
         specs_path = os.path.join(_REPO_ROOT, "docs", "pmo", "specs", "specs.md")
-        self.assertFalse(
-            os.path.exists(specs_path),
-            "This eligibility check is read-only and must never create the "
-            "real Specs artifact.")
+        if not os.path.isfile(specs_path):
+            return  # nothing to protect yet - not this test's concern
+        before = pathlib.Path(specs_path).read_bytes()
+        qac.validate_new_path_readiness(_REPO_ROOT)
+        after = pathlib.Path(specs_path).read_bytes()
+        self.assertEqual(
+            before, after,
+            "This eligibility check is read-only and must never modify "
+            "the real Specs artifact.")
 
     def test_initial_specs_creation_eligible(self):
         """The precise INITIAL_SPECS_CREATION classification: reuses the
