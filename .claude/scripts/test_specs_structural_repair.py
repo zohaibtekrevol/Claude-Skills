@@ -1,0 +1,602 @@
+#!/usr/bin/env python3
+"""Regression tests for .claude/scripts/specs-structural-repair.py and its
+shared core, .claude/lib/specs_structural_repair_core.py.
+
+Stdlib only. Run: python3 .claude/scripts/test_specs_structural_repair.py
+Exit 0 = all pass, 1 = at least one failure.
+
+Uses temporary, synthetic project fixtures only - no real WM Trucking
+project artifact is ever created, read as a mutable fixture, or modified.
+"""
+
+import importlib.util
+import json
+import os
+import shutil
+import sys
+import tempfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
+LIB_DIR = os.path.join(REPO_ROOT, ".claude", "lib")
+
+
+def _load(name, path, register=False):
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    if register:
+        sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+iac = _load("intent_approval_core", os.path.join(LIB_DIR, "intent_approval_core.py"), register=True)
+qac = _load("qa_register_core", os.path.join(LIB_DIR, "qa_register_core.py"), register=True)
+crc = _load("change_request_incorporation_core", os.path.join(LIB_DIR, "change_request_incorporation_core.py"), register=True)
+sac = _load("specs_approval_core", os.path.join(LIB_DIR, "specs_approval_core.py"), register=True)
+core = _load("specs_structural_repair_core", os.path.join(LIB_DIR, "specs_structural_repair_core.py"), register=True)
+cli = _load("specs_structural_repair", os.path.join(HERE, "specs-structural-repair.py"))
+approval_cli = _load("specs_approval_recorder", os.path.join(HERE, "specs-approval-recorder.py"))
+
+assert cli.finalize_transaction is core.finalize_transaction, (
+    "cli and core did not share one module instance")
+
+_RESULTS = []
+
+
+def check(name, ok, detail=""):
+    _RESULTS.append((name, bool(ok)))
+    print(("PASS" if ok else "FAIL") + "  " + name + ("" if ok else "   :: " + str(detail)))
+
+
+def code_of(result):
+    d = (result or {}).get("decision")
+    return d.get("code") if d else None
+
+
+# --------------------------------------------------------------------------- #
+# Fixtures (same shape/identity as test_specs_approval_recorder.py, so both
+# suites exercise the same real specs-governance-guard.py rules)
+# --------------------------------------------------------------------------- #
+
+CONFIG_YAML = '''schema_version: "1.0"
+
+project:
+  id: "SMART-BASKET"
+  name: "Smart Basket"
+  client: "Smart Basket / eBasket KSA"
+
+repository:
+  provider: "bitbucket"
+  workspace: "devops-tekrevol"
+  repository: "lets-explore-more-specs"
+  verified: true
+'''
+
+INTENT_VALIDATED = '''# Intent
+
+## Document Control
+
+- **Project:** Smart Basket
+- **Project ID:** SMART-BASKET
+- **Intent Version:** 1.0
+- **Status:** VALIDATED
+
+## 6. High-Level Product Requirements
+
+| ID | Requirement |
+|---|---|
+| INT-REQ-001 | Customer app |
+'''
+
+APPROVAL_VALID = '''decision: APPROVED
+approval_source: PM_EXPLICIT
+artifact: docs/pmo/intent/intent.md
+version: "1.0"
+approved_by: Jane PM
+'''
+
+QA_ALL_RESOLVED = (
+    "# Questions & Assumptions\n\n"
+    "## Document Control\n\n"
+    "- **Project:** Smart Basket\n"
+    "- **Client:** Smart Basket\n"
+    "- **Project ID:** SMART-BASKET\n"
+    "- **PM:** Jane PM\n"
+    "- **Date:** 2026-09-11\n"
+    "- **Intent Version:** 1.0\n\n"
+    "## Register\n\n"
+    "#### QST-001 - Title\n\n"
+    "- **ID:** QST-001\n"
+    "- **Type:** QUESTION\n"
+    "- **Statement:** Statement.\n"
+    "- **Why Resolution Is Required:** Needed.\n"
+    "- **Source / Evidence:** SRC-001\n"
+    "- **Related Intent Item:** \n"
+    "- **Owner:** PM\n"
+    "- **Status:** RESOLVED\n"
+    "- **Blocking:** NO\n"
+    "- **Resolution:** Resolved.\n"
+    "- **Resolution Authority:** PM_EXPLICIT\n"
+    "- **Resolution Evidence / Date:** 2026-09-11\n"
+    "- **Specs Impact:** Impacts FR-001.\n\n"
+)
+
+
+def build_specs(exec_auth="false", spec_version="0.1", include_validation_summary=False):
+    tail = (
+        "\n## Validation Summary\n\nAll active Intent requirements are "
+        "represented.\n" if include_validation_summary else ""
+    )
+    return '''# Specification: Smart Basket
+
+## Specification Document Control
+
+- **Project:** Smart Basket
+- **Client:** Smart Basket / eBasket KSA
+- **Project ID:** SMART-BASKET
+- **Spec Version:** {spec_version}
+- **Spec Status:** PROVISIONAL
+- **Intent Version:** 1.0
+- **Generated From:** docs/pmo/requirements/questions-and-assumptions.md
+- **Last Updated:** 2026-09-11T00:00:00Z
+- **Execution Authorized:** {exec_auth}
+- **Repository:** bitbucket:devops-tekrevol/lets-explore-more-specs
+
+## Functional Requirements
+
+### FR-001 - Customer places an online order
+
+- **ID:** FR-001
+- **Title:** Customer places an online order
+- **Module:** MOD-004 / Cart, Checkout and Payments
+- **Actor(s):** B2C customer
+- **Requirement:** The system lets a signed-in B2C customer confirm a cart and place an order.
+- **Source Requirement:** INT-REQ-001
+- **Introduced In:** 0.1
+- **Last Modified In:** 0.1
+- **Change Source:** INITIAL_INTENT
+- **Priority:** MUST
+- **Preconditions:** The customer is authenticated.
+- **Trigger:** The customer confirms checkout.
+- **Primary Behavior:** The system validates the cart and records the order.
+- **Business Rules:** N/A
+- **Validation Rules:** The cart must be non-empty.
+- **Alternate / Exception Behavior:** If payment fails the order is not created.
+- **Permissions:** A B2C customer may place their own order.
+- **Inputs:** Cart contents.
+- **Outputs:** A persisted order.
+- **Dependencies:** N/A
+- **Acceptance Criteria:** Given a valid cart When checkout is confirmed Then an order is created.
+- **Status:** ACTIVE
+
+## Non-Functional Requirements
+
+## Data Requirements
+
+| Entity | Field | Required | Validation | Related FR |
+|---|---|---|---|---|
+| Order | order_reference | Yes | System-generated, unique | FR-001 |
+
+## Integrations
+
+| Integration | Provider | FR / NFR | OPEN |
+|---|---|---|---|
+| N/A | N/A | N/A | N/A |
+
+## Open Questions
+
+| ID | Provenance | Origin | Question |
+|---|---|---|---|
+
+## Intent -> Specs Traceability
+
+| Requirement ID | FR/NFR IDs | Coverage | Notes |
+|---|---|---|---|
+| INT-REQ-001 | FR-001 | COVERED |  |
+
+## 30. Specification Change History
+
+| Version | Date | Change Source | Changed IDs | Summary | PM Decision |
+|---|---|---|---|---|---|
+| {spec_version} | 2026-09-11 | INITIAL_INTENT | FR-001 | Initial provisional specification generated from validated Intent + resolved Q&A | Generated |
+{validation_summary}'''.format(spec_version=spec_version, exec_auth=exec_auth,
+                              validation_summary=tail)
+
+
+def _w(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+
+
+def mkroot(specs=None, exec_auth="false", spec_version="0.1", config=CONFIG_YAML,
+          intent=INTENT_VALIDATED, approval=APPROVAL_VALID, qa=QA_ALL_RESOLVED,
+          specs_approval=None, cr_marker=None, feedback_marker=None,
+          repair_marker=None):
+    root = tempfile.mkdtemp(prefix="specs-repair-test-")
+    os.makedirs(os.path.join(root, ".pmo", "approvals"), exist_ok=True)
+    _w(os.path.join(root, ".pmo", "project-config.yaml"), config)
+    _w(os.path.join(root, "docs", "pmo", "intent", "intent.md"), intent)
+    _w(os.path.join(root, ".pmo", "approvals", "intent-approval.yaml"), approval)
+    _w(os.path.join(root, "docs", "pmo", "requirements",
+                    "questions-and-assumptions.md"), qa)
+    specs_text = specs if specs is not None else build_specs(
+        exec_auth=exec_auth, spec_version=spec_version)
+    _w(os.path.join(root, "docs", "pmo", "specs", "specs.md"), specs_text)
+    if specs_approval is not None:
+        _w(os.path.join(root, ".pmo", "approvals", "specs-approval.yaml"), specs_approval)
+    if cr_marker is not None:
+        _w(os.path.join(root, ".pmo", "change-request-transaction.json"), cr_marker)
+    if feedback_marker is not None:
+        _w(os.path.join(root, ".pmo", "feedback-transaction.json"), feedback_marker)
+    if repair_marker is not None:
+        _w(os.path.join(root, ".pmo", "specs-structural-repair-transaction.json"), repair_marker)
+    return root
+
+
+def _cleanup(root):
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def matching_specs_approval(spec_version="0.1"):
+    return sac.render_specs_approval_yaml("SMART-BASKET", spec_version, "Jane PM", "2026-09-12")
+
+
+# --------------------------------------------------------------------------- #
+# POSITIVE tests
+# --------------------------------------------------------------------------- #
+
+def test_1_eligible_repair_succeeds():
+    root = mkroot()
+    try:
+        r1 = cli.cmd_begin(root, "restore missing Validation Summary per corrected Skill contract")
+        check("1/begin_active", r1["status"] == "ACTIVE", r1)
+        r2 = cli.cmd_finalize(root)
+        check("1/finalize_repaired", r2["status"] == "REPAIRED", r2)
+    finally:
+        _cleanup(root)
+
+
+def test_2_validation_summary_derived_correctly():
+    root = mkroot()
+    try:
+        cli.cmd_begin(root, "reason")
+        cli.cmd_finalize(root)
+        text = open(os.path.join(root, "docs", "pmo", "specs", "specs.md")).read()
+        check("2/heading_present", "Validation Summary" in text)
+        check("2/fr_count_correct", "1 Functional Requirement(s)" in text, text)
+        check("2/no_fabricated_approval", "PM approved" not in text and "client sign" not in text.lower())
+    finally:
+        _cleanup(root)
+
+
+def test_3_full_validation_passes_after():
+    root = mkroot()
+    try:
+        cli.cmd_begin(root, "reason")
+        cli.cmd_finalize(root)
+        d = core.specs_guard.full_spec_validation(root)
+        check("3/full_validation_passes", d is None, d)
+    finally:
+        _cleanup(root)
+
+
+def test_4_5_fr_content_and_ids_byte_identical():
+    root = mkroot()
+    before = open(os.path.join(root, "docs", "pmo", "specs", "specs.md")).read()
+    try:
+        cli.cmd_begin(root, "reason")
+        cli.cmd_finalize(root)
+        after = open(os.path.join(root, "docs", "pmo", "specs", "specs.md")).read()
+        check("4/before_is_exact_prefix", after.startswith(before.rstrip("\n")))
+        check("5/fr_block_unchanged",
+              "### FR-001 - Customer places an online order" in after
+              and after.count("### FR-001") == before.count("### FR-001") == 1)
+    finally:
+        _cleanup(root)
+
+
+def test_6_7_still_unapproved_after_repair():
+    root = mkroot()
+    try:
+        cli.cmd_begin(root, "reason")
+        cli.cmd_finalize(root)
+        check("6/no_approval_file", not os.path.exists(
+            os.path.join(root, ".pmo", "approvals", "specs-approval.yaml")))
+        after = open(os.path.join(root, "docs", "pmo", "specs", "specs.md")).read()
+        check("7/exec_authorized_still_false", "**Execution Authorized:** false" in after)
+    finally:
+        _cleanup(root)
+
+
+def test_8_9_no_cr_no_changelog_created():
+    root = mkroot()
+    try:
+        cli.cmd_begin(root, "reason")
+        cli.cmd_finalize(root)
+        check("8/no_cr_dir_created", not os.path.isdir(os.path.join(root, "docs", "pmo", "cr"))
+              or not os.listdir(os.path.join(root, "docs", "pmo", "cr")))
+        check("9/no_changelog_dir_created", not os.path.isdir(
+            os.path.join(root, "docs", "pmo", "change-log")))
+    finally:
+        _cleanup(root)
+
+
+def test_10_subsequent_approval_still_required_and_now_possible():
+    root = mkroot()
+    try:
+        cli.cmd_begin(root, "reason")
+        cli.cmd_finalize(root)
+        # Before repair this would have failed at PMO-SPEC-APPROVAL-004
+        # (full_spec_validation not clean); now it should reach a clean
+        # BEGIN plan - proving approval remains a SEPARATE, still-required
+        # explicit action, and that the repair actually unblocked it.
+        r = approval_cli.cmd_begin(root, "Jane PM", "2026-09-19", statement="Reviewed.")
+        check("10/approval_now_reachable", r["status"] == "ACTIVE", r)
+        after = open(os.path.join(root, "docs", "pmo", "specs", "specs.md")).read()
+        check("10/still_unapproved_until_explicit_finalize",
+              "**Execution Authorized:** false" in after)
+    finally:
+        _cleanup(root)
+
+
+# --------------------------------------------------------------------------- #
+# NEGATIVE tests
+# --------------------------------------------------------------------------- #
+
+def test_11_blocked_when_execution_authorized_true():
+    evidence_text = build_specs(exec_auth="true", include_validation_summary=True).replace(
+        "| Generated |",
+        "| Approved - Execution Authorized per PM-DECISION: approved by "
+        "Jane PM on 2026-09-12 for Spec Version 0.1. |")
+    root = mkroot(specs=evidence_text)
+    try:
+        r = cli.cmd_begin(root, "reason")
+        check("11/blocked_exec_authorized_true",
+              code_of(r) == "PMO-SPEC-REPAIR-003", r)
+    finally:
+        _cleanup(root)
+
+
+def test_12_blocked_when_matching_approval_exists():
+    approved_text = build_specs(exec_auth="true", include_validation_summary=True).replace(
+        "| Generated |",
+        "| Approved - Execution Authorized per PM-DECISION: approved by "
+        "Jane PM on 2026-09-12 for Spec Version 0.1. |")
+    root = mkroot(specs=approved_text, specs_approval=matching_specs_approval())
+    try:
+        r = cli.cmd_begin(root, "reason")
+        check("12/blocked_matching_approval_exists",
+              code_of(r) in ("PMO-SPEC-REPAIR-003", "PMO-SPEC-REPAIR-004"), r)
+    finally:
+        _cleanup(root)
+
+
+def test_13_fr_text_change_rejected_by_preservation_check():
+    before = build_specs()
+    after = before.replace(
+        "The system validates the cart and records the order.",
+        "The system validates the cart and records the order immediately.")
+    ok, reason = core.content_preserves_existing(before, after)
+    check("13/fr_text_change_rejected", not ok, reason)
+
+
+def test_14_fr_id_change_rejected():
+    before = build_specs()
+    after = before.replace("### FR-001", "### FR-002").replace(
+        "- **ID:** FR-001", "- **ID:** FR-002")
+    ok, reason = core.content_preserves_existing(before, after)
+    check("14/fr_id_change_rejected", not ok, reason)
+
+
+def test_15_business_rule_change_rejected():
+    before = build_specs().replace(
+        "## Non-Functional Requirements\n",
+        "## Non-Functional Requirements\n\n## Business Rules\n\n"
+        "| ID | Rule |\n|---|---|\n| BR-001 | Original rule text |\n")
+    after = before.replace("| BR-001 | Original rule text |",
+                           "| BR-001 | Changed rule text |")
+    ok, reason = core.content_preserves_existing(before, after)
+    check("15/business_rule_change_rejected", not ok, reason)
+
+
+def test_16_nfr_change_rejected():
+    before = build_specs().replace(
+        "## Non-Functional Requirements\n",
+        "## Non-Functional Requirements\n\n### NFR-001 - Latency\n\n"
+        "- **Requirement:** p95 under 500ms\n")
+    after = before.replace("p95 under 500ms", "p95 under 300ms")
+    ok, reason = core.content_preserves_existing(before, after)
+    check("16/nfr_change_rejected", not ok, reason)
+
+
+def test_17_deferred_tbd_resolution_rejected():
+    before = build_specs().replace(
+        "| N/A | N/A | N/A | N/A |",
+        "| Weather | TBD (QST-007) | N/A | QST-007 |")
+    after = before.replace("| Weather | TBD (QST-007) | N/A | QST-007 |",
+                           "| Weather | AccuWeather | N/A |  |")
+    ok, reason = core.content_preserves_existing(before, after)
+    check("17/tbd_resolution_rejected", not ok, reason)
+
+
+def test_18_source_traceability_change_rejected():
+    before = build_specs()
+    after = before.replace(
+        "- **Source Requirement:** INT-REQ-001\n",
+        "- **Source Requirement:** INT-REQ-002\n")
+    ok, reason = core.content_preserves_existing(before, after)
+    check("18/traceability_change_rejected", not ok, reason)
+
+
+def test_19_intent_mapping_change_rejected():
+    before = build_specs()
+    after = before.replace(
+        "| INT-REQ-001 | FR-001 | COVERED |  |",
+        "| INT-REQ-001 | FR-001 | PARTIALLY_COVERED | now blocked |")
+    ok, reason = core.content_preserves_existing(before, after)
+    check("19/intent_mapping_change_rejected", not ok, reason)
+
+
+def test_20_qa_mapping_change_rejected():
+    before = build_specs().replace(
+        "| N/A | N/A | N/A | N/A |", "| N/A | N/A | N/A | QST-005 |")
+    after = before.replace("| N/A | N/A | N/A | QST-005 |",
+                           "| N/A | N/A | N/A | QST-009 |")
+    ok, reason = core.content_preserves_existing(before, after)
+    check("20/qa_mapping_change_rejected", not ok, reason)
+
+
+def test_21_version_change_rejected():
+    before = build_specs(spec_version="0.1")
+    after = before.replace("- **Spec Version:** 0.1", "- **Spec Version:** 0.2")
+    ok, reason = core.content_preserves_existing(before, after)
+    check("21/version_change_rejected", not ok, reason)
+
+
+def test_22_new_requirement_introduction_rejected():
+    before = build_specs()
+    tail = before.rstrip("\n") + "\n\n---\n\n### FR-999 - Sneaky new requirement\n\n- **ID:** FR-999\n"
+    ok, reason = core.content_preserves_existing(before, tail)
+    check("22/new_requirement_rejected", not ok, reason)
+
+
+def test_23_scope_expansion_new_section_rejected():
+    before = build_specs()
+    tail = before.rstrip("\n") + "\n\n---\n\n## New Feature Module\n\nExpanded scope text.\n"
+    ok, reason = core.content_preserves_existing(before, tail)
+    check("23/scope_expansion_rejected", not ok, reason)
+
+
+def test_24_unrelated_typo_edit_rejected():
+    before = build_specs()
+    after = before.replace("Cart, Checkout and Payments", "Cart, Checkout & Payments")
+    ok, reason = core.content_preserves_existing(before, after)
+    check("24/unrelated_edit_rejected", not ok, reason)
+
+
+def test_25_cr_marker_masquerade_rejected():
+    # (a) an OPEN CR transaction blocks BEGIN outright.
+    root = mkroot(cr_marker=json.dumps({
+        "transaction_type": "CHANGE_REQUEST_MANAGEMENT", "transaction_id": "CRTX-1",
+        "project_id": "SMART-BASKET", "cr_id": "CR-001", "operation": "STATE_TRANSITION",
+        "started_at": "2026-09-19T00:00:00Z", "status": "ACTIVE"}))
+    try:
+        r = cli.cmd_begin(root, "reason")
+        check("25a/open_cr_blocks_repair", code_of(r) == "PMO-SPEC-REPAIR-009", r)
+    finally:
+        _cleanup(root)
+    # (b) a marker claiming operation=INCORPORATION is never accepted as a
+    # valid STRUCTURAL_REPAIR marker.
+    fake = json.dumps({
+        "transaction_type": "SPECS_STRUCTURAL_REPAIR", "transaction_id": "X",
+        "project_id": "SMART-BASKET", "artifact": "docs/pmo/specs/specs.md",
+        "spec_version": "0.1", "operation": "INCORPORATION", "reason": "r",
+        "started_at": "2026-09-19T00:00:00Z", "status": "ACTIVE",
+        "pre_repair_validation_code": "PMO-SPEC-003",
+        "pre_repair_validation_message": "m", "permitted_repair_class": ["Validation Summary"],
+        "specs_hash_before": "x"})
+    data, err = core.parse_marker(fake)
+    check("25b/incorporation_operation_marker_rejected",
+          err is not None and "STRUCTURAL_REPAIR" in err, err)
+
+
+# --------------------------------------------------------------------------- #
+# Additional integrity checks
+# --------------------------------------------------------------------------- #
+
+def test_26_status_is_read_only():
+    root = mkroot()
+    try:
+        cli.cmd_begin(root, "reason")
+        before = open(os.path.join(root, "docs", "pmo", "specs", "specs.md")).read()
+        cli.cmd_status(root)
+        cli.cmd_status(root)
+        after = open(os.path.join(root, "docs", "pmo", "specs", "specs.md")).read()
+        check("26/status_read_only", before == after)
+    finally:
+        _cleanup(root)
+
+
+def test_27_dry_run_writes_nothing():
+    root = mkroot()
+    try:
+        before_marker = os.path.exists(os.path.join(root, ".pmo", "specs-structural-repair-transaction.json"))
+        before_specs = open(os.path.join(root, "docs", "pmo", "specs", "specs.md")).read()
+        r = cli.cmd_begin(root, "reason", dry_run=True)
+        after_marker = os.path.exists(os.path.join(root, ".pmo", "specs-structural-repair-transaction.json"))
+        after_specs = open(os.path.join(root, "docs", "pmo", "specs", "specs.md")).read()
+        check("27/dry_run_pass", r["status"] == "DRY_RUN_PASS", r)
+        check("27/no_marker_written", before_marker == after_marker == False)
+        check("27/no_specs_written", before_specs == after_specs)
+    finally:
+        _cleanup(root)
+
+
+def test_28_already_valid_specs_has_nothing_to_repair():
+    root = mkroot(specs=build_specs(include_validation_summary=True))
+    try:
+        r = cli.cmd_begin(root, "reason")
+        check("28/nothing_to_repair", code_of(r) == "PMO-SPEC-REPAIR-005", r)
+    finally:
+        _cleanup(root)
+
+
+def test_29_unsupported_failure_class_rejected():
+    # Fails validation for a reason STRUCTURAL_REPAIR cannot address
+    # (unsupported requirement, PMO-SPEC-015) rather than a missing section.
+    unsupported = build_specs(include_validation_summary=True).replace(
+        "- **Source Requirement:** INT-REQ-001\n",
+        "- **Source Requirement:** INT-REQ-099\n").replace(
+        "- **Change Source:** INITIAL_INTENT\n", "- **Change Source:** UNSOURCED\n")
+    root = mkroot(specs=unsupported)
+    try:
+        r = cli.cmd_begin(root, "reason")
+        check("29/unsupported_failure_class_rejected",
+              code_of(r) == "PMO-SPEC-REPAIR-006", r)
+    finally:
+        _cleanup(root)
+
+
+def main():
+    for fn in (
+        test_1_eligible_repair_succeeds,
+        test_2_validation_summary_derived_correctly,
+        test_3_full_validation_passes_after,
+        test_4_5_fr_content_and_ids_byte_identical,
+        test_6_7_still_unapproved_after_repair,
+        test_8_9_no_cr_no_changelog_created,
+        test_10_subsequent_approval_still_required_and_now_possible,
+        test_11_blocked_when_execution_authorized_true,
+        test_12_blocked_when_matching_approval_exists,
+        test_13_fr_text_change_rejected_by_preservation_check,
+        test_14_fr_id_change_rejected,
+        test_15_business_rule_change_rejected,
+        test_16_nfr_change_rejected,
+        test_17_deferred_tbd_resolution_rejected,
+        test_18_source_traceability_change_rejected,
+        test_19_intent_mapping_change_rejected,
+        test_20_qa_mapping_change_rejected,
+        test_21_version_change_rejected,
+        test_22_new_requirement_introduction_rejected,
+        test_23_scope_expansion_new_section_rejected,
+        test_24_unrelated_typo_edit_rejected,
+        test_25_cr_marker_masquerade_rejected,
+        test_26_status_is_read_only,
+        test_27_dry_run_writes_nothing,
+        test_28_already_valid_specs_has_nothing_to_repair,
+        test_29_unsupported_failure_class_rejected,
+    ):
+        fn()
+    total = len(_RESULTS)
+    failed = [n for n, ok in _RESULTS if not ok]
+    print("\n{}/{} passed".format(total - len(failed), total))
+    if failed:
+        print("FAILED: " + ", ".join(failed))
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
