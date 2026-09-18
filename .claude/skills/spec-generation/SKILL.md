@@ -729,6 +729,70 @@ Artifact-specific states govern each stream independently.
 
 ---
 
+## 24a. Required Sections — canonical source of truth
+
+`specs.md`'s complete list of mandatory sections is **not** re-derived or
+re-decided here. The single authoritative source is
+`.claude/hooks/specs-governance-guard.py`'s own `REQUIRED_SECTIONS` tuple -
+the exact same list `full_spec_validation` (Phase 4.5, Section 25) checks
+by machine. The table below is a **reproduction for convenience**, not a
+second definition - this Skill and that tuple **must** name the identical
+set of sections, and drift between them is a defect in this document, not
+a defect the guard silently tolerates:
+
+| Section | Conditional? |
+|---|---|
+| Functional Requirements | No |
+| Non-Functional Requirements | No |
+| Business Rules | Yes - only when BRs exist |
+| System States | Yes - only when a lifecycle/state model exists |
+| Data Requirements | No |
+| Integrations | No |
+| Open Questions | No |
+| Scope/Intent -> Specs Traceability | No |
+| Specification Change History | No |
+| **Validation Summary** | No |
+
+**Drift prevention.** `.claude/hooks/test_specs_governance_guard.py`'s
+`test_spec_generation_contract_alignment` (or the equivalent regression
+added alongside this correction) parses this exact table out of this file
+and asserts it is set-equal to `specs-governance-guard.py`'s
+`REQUIRED_SECTIONS` tuple. If a future change adds, removes or renames a
+required section in the guard without updating this table (or vice versa),
+that test fails the framework regression suite - this is the deterministic
+mechanism that keeps a Markdown Skill contract and a Python guard in sync
+without either one importing the other.
+
+### Validation Summary content requirement
+
+`## Validation Summary` is not boilerplate. It must state, using facts
+already established elsewhere in the same document (never a fabricated or
+aspirational claim):
+
+- the total `FR-*` / `NFR-*` / `BR-*` counts;
+- explicit confirmation that every active upstream requirement
+  (`SCP-REQ-*` on LEGACY, `INT-REQ-*` on NEW) appears in the traceability
+  matrix with a coverage value (Section 19.3);
+- explicit confirmation that no requirement lacks an upstream trace
+  (Section 6 / `PMO-SPEC-005`);
+- the current count of implementation-relevant `OPEN` /
+  `SCP-OPEN` / `BRAND-OPEN` / `SPEC-OPEN` items still visible in the
+  document;
+- confirmation that this specific write passed
+  `specs-governance-guard.py`'s `full_spec_validation` (Phase 4.5) - naming
+  the phase, never a fabricated timestamp, hash, or "approved" claim. This
+  section records that **generation-time structural validation** occurred
+  - it must **never** claim or imply PM approval, and must **never** be
+  used to justify `Execution Authorized: true` (that remains exclusively
+  the `specs-approval-recorder.py` transaction's own evidence, per
+  `specs_approval_core.py`).
+
+A `## Validation Summary` containing only generic prose ("this document was
+carefully reviewed") is not compliant - it must be re-derivable, fact by
+fact, from the rest of the same document.
+
+---
+
 ## 25. Mandatory phased generation control
 
 Every run is ordered phases. A phase failure **stops** the run at that phase;
@@ -799,8 +863,56 @@ ambiguity either way (Section 6).
 ### Phase 4 — Write the canonical artifact
 Write / overwrite `docs/pmo/specs/specs.md` (the **only** path — Section 4).
 Update the Specification Document Control block and append the Specification
-Change History row(s). Never touch Intent, Scope, evidence, feedback or CR
-sources (Section 27).
+Change History row(s), including a `## Validation Summary` section meeting
+Section 24a's content requirement. Never touch Intent, Scope, evidence,
+feedback or CR sources (Section 27).
+
+### Phase 4.5 — Post-generation full validation (mandatory gate)
+
+**This phase is not optional and is not satisfied by Phase 1 / Phase 3
+alone.** Phase 1 checks entry readiness (Intent/Scope/Q&A); Phase 3 checks
+coverage/versioning/identifier-integrity business rules. Neither checks
+required-section presence, Document Control completeness, FR/NFR field
+structure, or Change History table shape - those are
+`specs-governance-guard.py`'s own separate structural checks, and this
+project's `docs/pmo/` tree is **git-ignored**, so the guard's own
+`git add` / `git commit`-gated full validation (its normal controlled gate
+for a tracked repository) **never fires** for the live artifact. This
+Skill must therefore invoke the same authoritative check itself, directly,
+immediately after Phase 4 - exactly the precedent
+`artifact-export`'s own Skill already establishes for
+`artifact-export-guard.py` (see that Skill's own "Module-import mode"
+section for the pattern this mirrors).
+
+**Do not implement a second, simplified validation.** Call
+`specs-governance-guard.py`'s own `full_spec_validation` directly, module-
+import mode:
+
+```python
+import importlib.util, pathlib
+_p = pathlib.Path(".claude/hooks/specs-governance-guard.py").resolve()
+_s = importlib.util.spec_from_file_location("specs_governance_guard", _p)
+guard = importlib.util.module_from_spec(_s); _s.loader.exec_module(guard)
+
+root = guard.locate_project_root(".")
+d = guard.full_spec_validation(root)
+if d is not None:
+    raise SystemExit(f"SPECS_VALIDATION_FAILED  {d.code}: {d.message}")
+print("SPECS_VALIDATION = PASS")
+```
+
+- `d is None` → **PASS** → proceed to Phase 5.
+- `d` is a `Decision` (has `.code` / `.message`) → **FAIL** → **STOP**.
+  Report `SPECS_VALIDATION_FAILED` with the exact `PMO-SPEC-*` code and
+  message. **Do not** proceed to Phase 5, Phase 6, or Phase 7's readiness
+  report. **Do not** present the artifact as usable. **Do not** report
+  `READY_FOR_PM_REVIEW`, or any equivalent Final Result token implying PM
+  readiness, when this phase fails - that determination belongs to this
+  phase alone, never to Phase 1/Phase 3 passing in isolation.
+- The artifact that was already written (Phase 4) is **left on disk** as a
+  visible, diagnosable failure (consistent with "fail closed, never
+  silently delete or hide" - Section 26, `PMO-SPEC-010`) - but it is
+  reported as `SPECS_VALIDATION_FAILED`, never as ready.
 
 ### Phase 5 — Record artifact state
 Write only the `artifacts.specifications.*` block in `.pmo/project-config.yaml`
@@ -866,6 +978,21 @@ publish step reports:
 ```
 PUBLISH_BLOCKED_REPOSITORY_NOT_VERIFIED
 ```
+
+**Post-generation validation outcome (a generation halt, distinct from the
+codes above).** When Phase 4.5's `full_spec_validation` call returns a
+Decision, the artifact was written but is **not** usable - report:
+
+```
+SPECS_VALIDATION_FAILED  <PMO-SPEC-0XX>: <message>
+```
+
+naming the exact code and message `full_spec_validation` returned (never a
+paraphrase). This is a **reused** code from this skill's own Section 26 /
+`specs-governance-guard.py`'s own namespace, surfaced through the
+generation workflow - never a new, separate error taxonomy. Do not report
+`READY_FOR_PM_REVIEW` (or any equivalent Final Result token) alongside
+this outcome.
 
 ---
 
@@ -951,6 +1078,17 @@ route it back, `STOP`.
   a resolution that materially changes an already-approved Specs baseline
   still requires CR governance, exactly as an equivalent post-baseline Scope
   change would (Section 21.3).
+- MUST NOT report `READY_FOR_PM_REVIEW` (or set `Ready For PM Review: YES`
+  in the Section 31 report) without first running Phase 4.5's
+  `full_spec_validation` against the exact content that was written, and
+  confirming it returned `None` (PASS) — passing Phase 1 / Phase 3 alone is
+  never sufficient, because neither checks required-section presence,
+  Document Control completeness, or Change History table shape (Section 25,
+  Phase 4.5; Section 24a).
+- MUST NOT implement a second, simplified re-implementation of
+  `full_spec_validation` — Phase 4.5 always calls
+  `specs-governance-guard.py`'s own function directly (module-import mode,
+  Section 25).
 - MUST NOT commit or push unless explicitly asked.
 
 ---
@@ -973,13 +1111,20 @@ route it back, `STOP`.
   validation / permission / exception / state-transition scenarios.
 - The Specification Change History has a row for this version; no prior row
   removed.
+- A `## Validation Summary` section is present and meets Section 24a's
+  content requirement (fact-derived, not filler; never claims approval).
+- **Phase 4.5's `full_spec_validation(root)` call returned `None` (PASS) for
+  the exact content that was written** - never merely "Phase 1/Phase 3
+  passed." This is a hard requirement for reporting readiness, not an
+  optional extra check (Section 25, Phase 4.5).
 - `.pmo/project-config.yaml` has an `artifacts.specifications.*` block matching
   the artifact; no other `project-config` key, and no Intent / Scope / approval
   state, changed.
 - Intent, Scope, evidence, feedback and CR sources are byte-unchanged.
 - The **PMO SPEC GENERATION RESULT** report (Section 31) is emitted.
-- Validation `PASS`; on any `PMO-SPEC-*` condition, `BLOCKED` with the code and
-  route named.
+- Validation `PASS`; on any `PMO-SPEC-*` condition (including one surfaced
+  via Phase 4.5), `BLOCKED` / `SPECS_VALIDATION_FAILED` with the code and
+  route named - never `READY_FOR_PM_REVIEW`.
 
 ---
 
@@ -1006,13 +1151,23 @@ Scope Requirements:        <count of active SCP-REQ>
 Scope Traceability:        <covered>/<total>   (COVERED + PARTIALLY_COVERED counted per policy)
 Feedback Sources Applied:  <count>
 CR Sources Applied:        <count>
+Full Specs Validation:     PASS | FAILED (<PMO-SPEC-0XX>: <reason>)   (Phase 4.5 - specs-governance-guard.py full_spec_validation)
 Validation:                PASS | BLOCKED (<PMO-SPEC-0XX>: <reason>)
 Repository:                <repository configured in .pmo/project-config.yaml>
 Publish Eligibility:       READY | BLOCKED
 Publish Result:            NOT_ATTEMPTED | PUBLISHED | BLOCKED (PUBLISH_BLOCKED_REPOSITORY_NOT_VERIFIED)
+Ready For PM Review:       YES | NO
 ```
 
-`Validation: PASS` only when every Phase 1 / Phase 3 check passed and Sections
-27 and 24 held (no source or collateral `project-config` change). `Validation:
-BLOCKED` names the offending `PMO-SPEC-*` code; a source problem is additionally
-reported as `SPEC_REQUIRES_SOURCE_CORRECTION` with the routing note.
+`Validation: PASS` only when every Phase 1 / Phase 3 check passed, **Phase
+4.5's `Full Specs Validation` is `PASS`**, and Sections 27 and 24 held (no
+source or collateral `project-config` change). `Validation: BLOCKED` names
+the offending `PMO-SPEC-*` code; a source problem is additionally reported
+as `SPEC_REQUIRES_SOURCE_CORRECTION` with the routing note. **`Ready For PM
+Review: YES` is permitted only when `Full Specs Validation: PASS`** - it is
+never set from Phase 1/Phase 3 passing alone, and never fabricated to make
+a run look complete. A run that writes `specs.md` but fails Phase 4.5
+reports `Full Specs Validation: FAILED (<code>: <reason>)`,
+`Ready For PM Review: NO`, and `SPECS_VALIDATION_FAILED` as its outcome -
+the artifact remains on disk for diagnosis, but is never presented as a
+governed, reviewable baseline.
