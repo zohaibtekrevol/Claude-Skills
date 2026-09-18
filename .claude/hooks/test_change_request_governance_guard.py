@@ -270,6 +270,116 @@ def run(tool, tool_input, files=None, cr_marker=None, feedback_marker=None,
 
 
 # --------------------------------------------------------------------------- #
+# INITIAL_SPECS_CREATION fixtures (framework architecture correction)
+# --------------------------------------------------------------------------- #
+# The categorically-distinct CR-free path for creating docs/pmo/specs/specs.md
+# for the very first time, on the NEW (no-Scope) lifecycle. Identity matches
+# CONFIG_YAML above (project id SMART-BASKET / name Smart Basket) so these
+# fixtures compose with the ordinary `run()` harness and its default config.
+
+INITIAL_INTENT_VALIDATED = (
+    "# Intent\n\n"
+    "## Document Control\n\n"
+    "- **Project:** Smart Basket\n"
+    "- **Project ID:** SMART-BASKET\n"
+    "- **Intent Version:** 1.0\n"
+    "- **Status:** VALIDATED\n"
+)
+
+INITIAL_INTENT_DRAFT = INITIAL_INTENT_VALIDATED.replace(
+    "**Status:** VALIDATED", "**Status:** DRAFT")
+
+INITIAL_APPROVAL_VALID = (
+    "decision: APPROVED\n"
+    "approval_source: PM_EXPLICIT\n"
+    "artifact: docs/pmo/intent/intent.md\n"
+    'version: "1.0"\n'
+    "approved_by: Jane PM\n"
+)
+
+INITIAL_APPROVAL_MISMATCHED_VERSION = INITIAL_APPROVAL_VALID.replace(
+    'version: "1.0"', 'version: "0.9"')
+
+INITIAL_APPROVAL_RELPATH = os.path.join(".pmo", "approvals", "intent-approval.yaml")
+INITIAL_INTENT_RELPATH = os.path.join("docs", "pmo", "intent", "intent.md")
+INITIAL_QA_RELPATH = os.path.join("docs", "pmo", "requirements",
+                                  "questions-and-assumptions.md")
+
+
+def initial_qa_record(rid, status="RESOLVED", blocking="NO", resolution="Resolved.",
+                      authority="PM_EXPLICIT", evidence="2026-09-11"):
+    return (
+        "#### {rid} - Title\n\n"
+        "- **ID:** {rid}\n"
+        "- **Type:** QUESTION\n"
+        "- **Statement:** Statement.\n"
+        "- **Why Resolution Is Required:** Needed for FR design.\n"
+        "- **Source / Evidence:** SRC-001\n"
+        "- **Related Intent Item:** \n"
+        "- **Owner:** PM\n"
+        "- **Status:** {status}\n"
+        "- **Blocking:** {blocking}\n"
+        "- **Resolution:** {resolution}\n"
+        "- **Resolution Authority:** {authority}\n"
+        "- **Resolution Evidence / Date:** {evidence}\n"
+        "- **Specs Impact:** Impacts FR-001.\n\n"
+    ).format(rid=rid, status=status, blocking=blocking, resolution=resolution,
+             authority=authority, evidence=evidence)
+
+
+def initial_qa_doc(records_md):
+    return (
+        "# Questions & Assumptions\n\n"
+        "## Document Control\n\n"
+        "- **Project:** Smart Basket\n"
+        "- **Client:** Smart Basket\n"
+        "- **Project ID:** SMART-BASKET\n"
+        "- **PM:** Jane PM\n"
+        "- **Date:** 2026-09-11\n"
+        "- **Intent Version:** 1.0\n\n"
+        "## Register\n\n"
+        "{}".format(records_md)
+    )
+
+
+INITIAL_QA_ALL_RESOLVED = initial_qa_doc(
+    initial_qa_record("QST-001", status="RESOLVED", blocking="NO"))
+INITIAL_QA_BLOCKING_OPEN = initial_qa_doc(
+    initial_qa_record("QST-001", status="OPEN", blocking="YES",
+                      resolution="", authority="", evidence=""))
+INITIAL_QA_DEFERRED_ONLY = initial_qa_doc(
+    initial_qa_record("QST-001", status="DEFERRED", blocking="NO") +
+    initial_qa_record("QST-002", status="NON_BLOCKING", blocking="NO"))
+
+
+def initial_specs_creation_files(intent=INITIAL_INTENT_VALIDATED,
+                                 approval=INITIAL_APPROVAL_VALID,
+                                 qa=INITIAL_QA_ALL_RESOLVED, omit_intent=False,
+                                 omit_approval=False, omit_qa=False):
+    """The full fixture set for an eligible INITIAL_SPECS_CREATION write:
+    VALIDATED Intent + matching PM approval + a structurally valid Q&A
+    register with zero OPEN+Blocking:YES records. Individual pieces can be
+    omitted or swapped to exercise each failure branch. Never includes
+    docs/pmo/specs/specs.md itself - callers add that via `run()`'s own
+    `tool_input` for the write under test."""
+    files = {}
+    if not omit_intent and intent is not None:
+        files[INITIAL_INTENT_RELPATH.replace(os.sep, "/")] = intent
+    if not omit_approval and approval is not None:
+        files[INITIAL_APPROVAL_RELPATH.replace(os.sep, "/")] = approval
+    if not omit_qa and qa is not None:
+        files[INITIAL_QA_RELPATH.replace(os.sep, "/")] = qa
+    return files
+
+
+def run_initial_specs_write(**fixture_kwargs):
+    files = initial_specs_creation_files(**fixture_kwargs)
+    return run("Write", {"file_path": "docs/pmo/specs/specs.md",
+                         "content": "# Specs\n\nInitial baseline.\n"},
+              files=files)
+
+
+# --------------------------------------------------------------------------- #
 # unit checks
 # --------------------------------------------------------------------------- #
 
@@ -770,6 +880,152 @@ def test_extra_cr_register_lifecycle_write_requires_marker():
 
 
 # --------------------------------------------------------------------------- #
+# INITIAL_SPECS_CREATION - framework architecture correction
+# --------------------------------------------------------------------------- #
+# specs.md does not exist in any of these fixtures (no `files` entry for it),
+# which is itself the deterministic signal that this is the first-ever
+# governed Specs baseline, never a post-baseline mutation. No CR marker is
+# created for tests 29/31/33/35/37 - proving no CR is required or consulted
+# for a legitimate initial creation.
+
+def test_29_initial_specs_creation_fully_eligible_allowed():
+    d = run_initial_specs_write()
+    check("29/initial_specs_creation_eligible__ALLOW", d is None, code(d))
+
+
+def test_30_initial_specs_creation_missing_intent_denied():
+    d = run_initial_specs_write(omit_intent=True)
+    check("30/initial_specs_creation_missing_intent__DENY_028",
+          code(d) == "PMO-CR-GUARD-028", code(d))
+
+
+def test_31_initial_specs_creation_non_validated_intent_denied():
+    d = run_initial_specs_write(intent=INITIAL_INTENT_DRAFT)
+    check("31/initial_specs_creation_draft_intent__DENY_028",
+          code(d) == "PMO-CR-GUARD-028", code(d))
+
+
+def test_32_initial_specs_creation_missing_approval_denied():
+    d1 = run_initial_specs_write(omit_approval=True)
+    check("32a/initial_specs_creation_missing_approval__DENY_028",
+          code(d1) == "PMO-CR-GUARD-028", code(d1))
+
+    d2 = run_initial_specs_write(approval=INITIAL_APPROVAL_MISMATCHED_VERSION)
+    check("32b/initial_specs_creation_mismatched_approval__DENY_028",
+          code(d2) == "PMO-CR-GUARD-028", code(d2))
+
+
+def test_33_initial_specs_creation_missing_qa_denied():
+    d = run_initial_specs_write(omit_qa=True)
+    check("33/initial_specs_creation_missing_qa__DENY_029",
+          code(d) == "PMO-CR-GUARD-029", code(d))
+
+
+def test_34_initial_specs_creation_blocking_qa_denied():
+    d = run_initial_specs_write(qa=INITIAL_QA_BLOCKING_OPEN)
+    check("34/initial_specs_creation_blocking_qa__DENY_030",
+          code(d) == "PMO-CR-GUARD-030", code(d))
+
+
+def test_35_initial_specs_creation_deferred_only_allowed():
+    d = run_initial_specs_write(qa=INITIAL_QA_DEFERRED_ONLY)
+    check("35/initial_specs_creation_deferred_only__ALLOW", d is None, code(d))
+
+
+def test_36_post_baseline_direct_mutation_without_cr_denied():
+    # specs.md already exists (unlike tests 29-35 above); no CR marker at
+    # all - the pre-existing, unchanged post-baseline rule must still deny.
+    files = initial_specs_creation_files()
+    files["docs/pmo/specs/specs.md"] = specs_doc("0.1")
+    d = run("Write", {"file_path": "docs/pmo/specs/specs.md",
+                      "content": specs_doc("0.2")}, files=files)
+    check("36/post_baseline_direct_mutation_no_cr__DENY_013",
+          code(d) == "PMO-CR-GUARD-013", code(d))
+
+
+def test_37_post_baseline_valid_incorporation_still_allowed():
+    # Existing CR-incorporation behavior for an already-existing baseline
+    # is byte-for-byte unchanged by INITIAL_SPECS_CREATION.
+    files = initial_specs_creation_files()
+    files["docs/pmo/specs/specs.md"] = specs_doc("0.1")
+    files["docs/pmo/cr/CR-130.md"] = cr_doc(
+        "CR-130", status="APPROVED", decision="APPROVED",
+        decision_date="2026-09-14", decision_by="Client",
+        approval_evidence="email 2026-09-14",
+        history_rows=[
+            "| 2026-09-14 | — | DRAFT | PM | initial |",
+            "| 2026-09-14 | DRAFT | PM_REVIEW | PM | ready |",
+            "| 2026-09-14 | PM_REVIEW | PENDING_CLIENT_DECISION | PM | sent |",
+            "| 2026-09-14 | PENDING_CLIENT_DECISION | APPROVED | Client | approved |",
+        ])
+    d = run("Write", {"file_path": "docs/pmo/specs/specs.md",
+                      "content": specs_doc("0.2", "CR-130")},
+            files=files,
+            cr_marker={"cr_id": "CR-130", "operation": "INCORPORATION",
+                      "baseline_specs_version": "0.1",
+                      "target_specs_version": "0.2"})
+    check("37/post_baseline_valid_incorporation__ALLOW", d is None, code(d))
+
+
+def test_38_bug_feedback_cannot_mutate_specs():
+    # A BUG feedback item never produces a CR - it stays in the Feedback
+    # Tracker only (feedback-management governance). Absent any CR marker
+    # at all, an existing Specs baseline must remain unmutable regardless.
+    files = initial_specs_creation_files()
+    files["docs/pmo/specs/specs.md"] = specs_doc("0.1")
+    d = run("Write", {"file_path": "docs/pmo/specs/specs.md",
+                      "content": specs_doc("0.1") + "\nBUG fix inline.\n"},
+            files=files)
+    check("38/bug_feedback_cannot_mutate_specs__DENY_013",
+          code(d) == "PMO-CR-GUARD-013", code(d))
+
+
+def test_39_enhancement_feedback_cannot_mutate_specs():
+    # Same shape as BUG - ENHANCEMENT is also Tracker-only and never opens
+    # a CR-incorporation transaction against Specs.
+    files = initial_specs_creation_files()
+    files["docs/pmo/specs/specs.md"] = specs_doc("0.1")
+    d = run("Write", {"file_path": "docs/pmo/specs/specs.md",
+                      "content": specs_doc("0.1") + "\nENHANCEMENT inline.\n"},
+            files=files, feedback_marker=True)
+    check("39/enhancement_feedback_cannot_mutate_specs__DENY_013",
+          code(d) == "PMO-CR-GUARD-013", code(d))
+
+
+def test_40_pm_proposed_scope_expansion_cannot_bypass_cr():
+    # A PM_PROPOSED CR that exists but has not reached an OPEN
+    # INCORPORATION transaction must not be usable to mutate an existing
+    # Specs baseline directly.
+    files = initial_specs_creation_files()
+    files["docs/pmo/specs/specs.md"] = specs_doc("0.1")
+    files["docs/pmo/cr/CR-131.md"] = cr_doc(
+        "CR-131", origin="PM_PROPOSED", status="PENDING_CLIENT_DECISION")
+    d = run("Write", {"file_path": "docs/pmo/specs/specs.md",
+                      "content": specs_doc("0.2", "CR-131")},
+            files=files, cr_marker={"cr_id": "CR-131", "operation": "APPROVAL"})
+    check("40/pm_proposed_expansion_no_incorporation__DENY_013",
+          code(d) == "PMO-CR-GUARD-013", code(d))
+
+
+def test_41_initial_specs_creation_blocked_while_cr_transaction_open():
+    files = initial_specs_creation_files()
+    d = run("Write", {"file_path": "docs/pmo/specs/specs.md",
+                      "content": "# Specs\n\nInitial baseline.\n"},
+            files=files, cr_marker={"cr_id": "CR-132", "operation": "STATE_TRANSITION"})
+    check("41/initial_specs_creation_open_cr_conflict__DENY_027",
+          code(d) == "PMO-CR-GUARD-027", code(d))
+
+
+def test_42_initial_specs_creation_blocked_while_feedback_transaction_open():
+    files = initial_specs_creation_files()
+    d = run("Write", {"file_path": "docs/pmo/specs/specs.md",
+                      "content": "# Specs\n\nInitial baseline.\n"},
+            files=files, feedback_marker=True)
+    check("42/initial_specs_creation_open_feedback_conflict__DENY_027",
+          code(d) == "PMO-CR-GUARD-027", code(d))
+
+
+# --------------------------------------------------------------------------- #
 
 def main():
     test_units()
@@ -806,6 +1062,20 @@ def main():
         test_extra_feedback_safe_shape_deferred_without_cr_marker,
         test_extra_unrelated_path_and_tool,
         test_extra_cr_register_lifecycle_write_requires_marker,
+        test_29_initial_specs_creation_fully_eligible_allowed,
+        test_30_initial_specs_creation_missing_intent_denied,
+        test_31_initial_specs_creation_non_validated_intent_denied,
+        test_32_initial_specs_creation_missing_approval_denied,
+        test_33_initial_specs_creation_missing_qa_denied,
+        test_34_initial_specs_creation_blocking_qa_denied,
+        test_35_initial_specs_creation_deferred_only_allowed,
+        test_36_post_baseline_direct_mutation_without_cr_denied,
+        test_37_post_baseline_valid_incorporation_still_allowed,
+        test_38_bug_feedback_cannot_mutate_specs,
+        test_39_enhancement_feedback_cannot_mutate_specs,
+        test_40_pm_proposed_scope_expansion_cannot_bypass_cr,
+        test_41_initial_specs_creation_blocked_while_cr_transaction_open,
+        test_42_initial_specs_creation_blocked_while_feedback_transaction_open,
     ):
         fn()
     total = len(_RESULTS)

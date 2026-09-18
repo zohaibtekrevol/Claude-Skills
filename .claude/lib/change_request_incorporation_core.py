@@ -66,18 +66,46 @@ Error namespace
 -----------------
 Two disjoint namespaces are emitted by this module:
 
-* ``PMO-CR-GUARD-001`` .. ``PMO-CR-GUARD-026`` - the existing, unchanged
-  Phase 2B guard invariants (CR field/lifecycle/transition/Scope/Specs/
-  Change-Log write validation). These functions moved here verbatim from
-  ``change-request-governance-guard.py`` so the guard and this module's
-  ``finalize_transaction`` apply the identical rules; their codes and
-  meanings are unchanged from Phase 2B.
+* ``PMO-CR-GUARD-001`` .. ``PMO-CR-GUARD-030`` - the CR-governance guard
+  invariants (CR field/lifecycle/transition/Scope/Specs/Change-Log write
+  validation). ``001``-``026`` moved here verbatim from
+  ``change-request-governance-guard.py`` (Phase 2B) so the guard and this
+  module's ``finalize_transaction`` apply the identical rules; their codes
+  and meanings are unchanged from Phase 2B. ``027``-``030`` are new:
+  INITIAL_SPECS_CREATION governance (see ``validate_specs_write`` /
+  ``validate_initial_specs_creation``) - the categorically distinct,
+  CR-free authorization path for creating `docs/pmo/specs/specs.md` for
+  the very first time, kept in the same namespace because it is still a
+  rule about what may write `specs.md`, just not a CR-incorporation rule.
 * ``PMO-CR-INTEGRATE-001`` .. ``PMO-CR-INTEGRATE-025`` (see
   ``PMO_CR_INTEGRATE_CODES``) - new, Phase 2C orchestration-specific
   conditions (BEGIN preconditions, transaction conflicts, baseline drift,
   reconciliation/partial-transaction states, idempotency). Never reuses a
   ``PMO-CR-GUARD-*`` or Skill-level ``PMO-CR-*`` code for a different
   meaning.
+
+INITIAL_SPECS_CREATION vs. CR_INCORPORATION
+--------------------------------------------
+``docs/pmo/specs/specs.md`` has exactly two legitimate write paths, and
+``validate_specs_write`` dispatches between them on one fact only - whether
+the file already exists on disk:
+
+* It does **not** exist yet -> this can only be the first-ever governed
+  Specs baseline (``spec-generation``'s own INITIAL run). No CR is
+  required, consulted, or fabricated. Eligibility is established solely
+  by reusing the existing Specs new-lifecycle readiness gate
+  (``qa_register_core.validate_new_path_readiness`` - identical to
+  PMO-SPEC-021/022/023) plus a check that no OPEN CR or Feedback
+  transaction is concurrently active for this project. See
+  ``validate_initial_specs_creation``.
+* It already exists -> it is a governed baseline. Ordinary direct
+  mutation remains prohibited unconditionally; only a valid OPEN
+  CR-INCORPORATION transaction may write it. This branch is byte-for-byte
+  the pre-existing Phase 2B rule - unchanged.
+
+These two branches are deliberately never merged into one "if specs.md
+exists, allow" / "spec-generation may always write Specs" shortcut - see
+``validate_specs_write``'s own comments.
 
 Python 3, standard library only. No third-party dependencies.
 """
@@ -88,6 +116,21 @@ import hashlib
 import json
 import os
 import re
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# Imported under its own namespace on purpose, matching the convention
+# qa_register_core.py itself already uses for intent_approval_core - see
+# that module's docstring. INITIAL_SPECS_CREATION eligibility (Section
+# "PMO-CR-GUARD-027..030" below) delegates entirely to
+# `qa_register_core.validate_new_path_readiness` - the exact same NEW
+# (no-Scope) lifecycle Specs-entry gate `specs-governance-guard.py` uses
+# for PMO-SPEC-021/022/023 - so there is no second, divergent
+# implementation of "is this project ready for Specs" anywhere in the
+# framework.
+import qa_register_core as qac  # noqa: E402
 
 
 CR_DIR_POSIX = "docs/pmo/cr"
@@ -1397,15 +1440,84 @@ def validate_scope_write(tool_name, tool_input, root, rel, state, marker_data, m
     return None
 
 
+def validate_initial_specs_creation(root, state, marker_data):
+    """PMO-CR-GUARD-027..030 - the CR-free INITIAL_SPECS_CREATION
+    authorization path (see module docstring). Called only when
+    docs/pmo/specs/specs.md does not yet exist - that non-existence is
+    itself the deterministic signal that this can only be the first-ever
+    governed Specs baseline, never a post-baseline mutation.
+
+    Returns a deny Decision, or None when the write is authorised. Fails
+    closed: any prerequisite this cannot positively establish denies the
+    write, exactly as an unauthorised post-baseline write would.
+    """
+    # 10. No active Feedback or CR transaction may conflict with this
+    # operation. An OPEN CR transaction means something else is already
+    # mid-flight against this project's governed artifacts; initial Specs
+    # creation must not silently proceed underneath it. A CR marker that
+    # is merely present-but-not-OPEN (stale/invalid/wrong-project) is not
+    # an active conflict and is ignored here, exactly as it already is
+    # everywhere else in this module.
+    if state == "OPEN":
+        return deny(
+            "PMO-CR-GUARD-027",
+            "docs/pmo/specs/specs.md does not exist yet, and an OPEN "
+            "change-request transaction is currently active for this "
+            "project - initial Specs baseline creation must not proceed "
+            "while a CR transaction is in progress.",
+        )
+    if feedback_marker_is_open(root):
+        return deny(
+            "PMO-CR-GUARD-027",
+            "docs/pmo/specs/specs.md does not exist yet, and an OPEN "
+            "feedback-management transaction is currently active for this "
+            "project - initial Specs baseline creation must not proceed "
+            "while a Feedback transaction is in progress.",
+        )
+
+    # 2-8. Reuse - never duplicate - the exact same NEW (no-Scope)
+    # lifecycle Specs-entry readiness gate spec-generation's own
+    # specs-governance-guard.py enforces as PMO-SPEC-021/022/023: canonical
+    # Intent VALIDATED + matching PM approval + identity match, a
+    # structurally valid canonical Q&A register, and zero OPEN+Blocking:YES
+    # records. This is also exactly what makes the write "clearly
+    # identifiable as governed initial Specs generation" (requirement 9):
+    # nothing but a project that has genuinely completed Intent validation
+    # and Q&A resolution can satisfy this gate, so passing it is itself the
+    # positive signal - there is no separate "intent flag" to fabricate or
+    # trust.
+    result = qac.validate_new_path_readiness(root)
+    if result is not None:
+        kind, message = result
+        code = {
+            "INTENT_NOT_READY": "PMO-CR-GUARD-028",
+            "QA_REGISTER_NOT_READY": "PMO-CR-GUARD-029",
+            "QA_BLOCKING_ITEM_OPEN": "PMO-CR-GUARD-030",
+        }.get(kind, "PMO-CR-GUARD-028")
+        return deny(code, message)
+
+    return None
+
+
 def validate_specs_write(tool_name, tool_input, root, state, marker_data, marker_err):
+    abspath = os.path.join(root, *SPECS_POSIX.split("/"))
+    existing = read_text(abspath)
+
+    # -- INITIAL_SPECS_CREATION: specs.md does not exist yet. Categorically -#
+    # -- distinct from post-baseline mutation below - see module docstring. -#
+    if existing is None:
+        return validate_initial_specs_creation(root, state, marker_data)
+
+    # -- POST-BASELINE: specs.md already exists as a governed baseline.    -#
+    # -- Ordinary direct mutation remains prohibited unconditionally; only -#
+    # -- a valid OPEN CR-INCORPORATION transaction may write it. Byte-for- -#
+    # -- byte the pre-existing rule - unchanged by INITIAL_SPECS_CREATION. -#
     if state != "OPEN" or marker_data.get("operation") != "INCORPORATION":
         return deny(
             "PMO-CR-GUARD-013",
             "docs/pmo/specs/specs.md may only be written during an OPEN "
             "change-request transaction whose operation is INCORPORATION.",
         )
-    abspath = os.path.join(root, *SPECS_POSIX.split("/"))
-    existing = read_text(abspath)
     cr_id = marker_data.get("cr_id")
     cr_fields = read_cr_fields(root, cr_id) if cr_id else None
     if not cr_fields or cr_fields.get("Status", "").strip() != "APPROVED":

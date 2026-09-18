@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Read-only compatibility check: is the real WM Trucking project eligible to
-enter the NEW (Intent + Q&A) lifecycle under the redesigned framework?
+enter the NEW (Intent + Q&A) lifecycle under the redesigned framework, and -
+as of the INITIAL_SPECS_CREATION framework correction - is it eligible for
+INITIAL_SPECS_CREATION specifically?
 
 This test reads the actual repository state (docs/pmo/intent/intent.md,
-.pmo/approvals/intent-approval.yaml, .pmo/project-config.yaml) and asserts
-eligibility - it never writes anything. It does not create
-docs/pmo/requirements/questions-and-assumptions.md, docs/pmo/specs/specs.md,
-or any docs/pmo/scope/ artifact; those remain PMO_ENGINE deliverables for a
-separate, explicit run.
+.pmo/approvals/intent-approval.yaml, .pmo/project-config.yaml, and - since a
+separate, already-completed PMO_ENGINE run produced it -
+docs/pmo/requirements/questions-and-assumptions.md) and asserts eligibility -
+it never writes anything. It does not create or modify the Q&A register, and
+it does not create docs/pmo/specs/specs.md or any docs/pmo/scope/ artifact;
+Specs generation itself remains a separate, explicit run.
 
 Standard-library `unittest`.
 """
@@ -66,14 +69,25 @@ class WmTruckingNewLifecycleEligibilityTests(unittest.TestCase):
             "identity match); got: {}".format(err),
         )
 
-    def test_no_qa_register_created_by_this_check(self):
+    def test_qa_register_exists_and_this_check_never_modifies_it(self):
+        """The canonical Q&A register is a real, separately-produced PMO
+        artifact (requirement-gathering's own governed deliverable) - this
+        test only reads it, byte-for-byte, and never writes it."""
         qa_path = os.path.join(
             _REPO_ROOT, "docs", "pmo", "requirements",
             "questions-and-assumptions.md")
-        self.assertFalse(
-            os.path.exists(qa_path),
-            "This eligibility check is read-only and must never create the "
-            "real Q&A register.")
+        self.assertTrue(
+            os.path.isfile(qa_path),
+            "WM Trucking's canonical Q&A register should already exist as "
+            "a governed artifact for this eligibility check to be "
+            "meaningful.")
+        before = pathlib.Path(qa_path).read_bytes()
+        qac.validate_new_path_readiness(_REPO_ROOT)
+        after = pathlib.Path(qa_path).read_bytes()
+        self.assertEqual(
+            before, after,
+            "This eligibility check is read-only and must never modify "
+            "the real Q&A register.")
 
     def test_no_specs_created_by_this_check(self):
         specs_path = os.path.join(_REPO_ROOT, "docs", "pmo", "specs", "specs.md")
@@ -81,6 +95,44 @@ class WmTruckingNewLifecycleEligibilityTests(unittest.TestCase):
             os.path.exists(specs_path),
             "This eligibility check is read-only and must never create the "
             "real Specs artifact.")
+
+    def test_initial_specs_creation_eligible(self):
+        """The precise INITIAL_SPECS_CREATION classification: reuses the
+        exact same `qa_register_core.validate_new_path_readiness` that both
+        `specs-governance-guard.py` (PMO-SPEC-021/022/023) and the CR
+        guard's new `validate_initial_specs_creation`
+        (PMO-CR-GUARD-027/028/029/030) delegate to - so this assertion is
+        the single source of truth for "is WM Trucking
+        INITIAL_SPECS_CREATION_ELIGIBLE", not a third, divergent check."""
+        result = qac.validate_new_path_readiness(_REPO_ROOT)
+        self.assertIsNone(
+            result,
+            "WM Trucking should be classified INITIAL_SPECS_CREATION_"
+            "ELIGIBLE (VALIDATED Intent + matching PM approval + a "
+            "structurally valid Q&A register with zero OPEN+Blocking:YES "
+            "records); got failure: {}".format(result),
+        )
+
+    def test_no_files_modified_by_this_entire_check(self):
+        """Belt-and-suspenders: every artifact this file reads must be
+        byte-identical before and after the full eligibility check runs."""
+        paths = [
+            os.path.join(_REPO_ROOT, "docs", "pmo", "intent", "intent.md"),
+            os.path.join(_REPO_ROOT, ".pmo", "approvals",
+                        "intent-approval.yaml"),
+            os.path.join(_REPO_ROOT, ".pmo", "project-config.yaml"),
+            os.path.join(_REPO_ROOT, "docs", "pmo", "requirements",
+                        "questions-and-assumptions.md"),
+        ]
+        before = {p: pathlib.Path(p).read_bytes() for p in paths
+                 if os.path.isfile(p)}
+        qac.validate_new_path_readiness(_REPO_ROOT)
+        qac.validate_prerequisite_intent(_REPO_ROOT)
+        specs_guard.has_legacy_scope(_REPO_ROOT)
+        for p, content in before.items():
+            self.assertEqual(
+                content, pathlib.Path(p).read_bytes(),
+                "{} was modified by a read-only eligibility check.".format(p))
 
 
 if __name__ == "__main__":
