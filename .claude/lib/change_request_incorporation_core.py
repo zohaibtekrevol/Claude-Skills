@@ -199,6 +199,18 @@ INCORPORATION_MARKER_REQUIRED_FIELDS = (
     "baseline_specs_version", "baseline_specs_path", "baseline_specs_hash",
     "target_scope_version", "target_specs_version", "target_change_log_id",
 )
+# NEW (no-Scope) lifecycle CR incorporation: the same INCORPORATION operation,
+# marked lifecycle == "NO_SCOPE". No Scope version and no standalone Change Log
+# are involved; the Specification Change History inside specs.md is the single
+# authoritative change-history model (see cr_no_scope_incorporation_core.py).
+NO_SCOPE_LIFECYCLE = "NO_SCOPE"
+NO_SCOPE_MARKER_REQUIRED_FIELDS = (
+    "baseline_specs_version", "baseline_specs_path", "baseline_specs_hash",
+    "target_specs_version",
+)
+# CR states that may authorize / remain the Change Source of Specs content.
+CR_AUTHORIZING_STATUSES = ("APPROVED", "INCORPORATED")
+
 ALLOWED_OPERATIONS = {
     "CREATE_PM_PROPOSED", "STATE_TRANSITION", "APPROVAL", "REJECTION",
     "DEFERRAL", "CANCELLATION", "INCORPORATION",
@@ -601,6 +613,15 @@ def parse_cr_marker(text):
     if data.get("operation") == "INCORPORATION":
         if cr_id in (None, ""):
             return None, "marker cr_id is required once operation is INCORPORATION"
+        if data.get("lifecycle") == NO_SCOPE_LIFECYCLE:
+            for field in NO_SCOPE_MARKER_REQUIRED_FIELDS:
+                if field not in data or data.get(field) in (None, ""):
+                    return None, (
+                        "marker is missing required field '{}' (required for a "
+                        "NO_SCOPE INCORPORATION)".format(field))
+            if not HASH_HEX_RE.match(str(data.get("baseline_specs_hash"))):
+                return None, "marker baseline_specs_hash is not a recognisable sha256 hex digest"
+            return data, None
         for field in INCORPORATION_MARKER_REQUIRED_FIELDS:
             if field not in data or data.get(field) in (None, ""):
                 return None, (
@@ -881,6 +902,55 @@ def read_specs_spec_version(root):
     if content is None:
         return None, None
     return parse_specs_version_value(content), content
+
+
+def cr_record_authorization(text, cr_id=None):
+    """(status, error). Structural read of ONE CR record: the canonical
+    '| Field | Requirement | Value |' table is parsed with the same table
+    parser the guards use; a record without that table falls back to a plain
+    'Status: X' line (legacy fixtures). `status` is the CR's status ONLY when
+    it is one of CR_AUTHORIZING_STATUSES AND the record is well-formed
+    (matching CR ID; Decision APPROVED with Decision Date/By and Approval
+    Evidence present for table records); otherwise None + the reason."""
+    headers, rows = first_table(text or "")
+    if headers:
+        fields = field_map_from_table(headers, rows)
+        status = fields.get("Status", "").strip()
+        if cr_id and fields.get("CR ID", "").strip() != cr_id:
+            return None, "CR ID field does not match the record identity"
+        if status not in CR_AUTHORIZING_STATUSES:
+            return None, "status '{}' does not authorize Specs changes".format(status)
+        if fields.get("Decision", "").strip() != "APPROVED":
+            return None, "Decision is not APPROVED"
+        for f in ("Decision Date", "Decision By", "Approval Evidence"):
+            if not fields.get(f, "").strip():
+                return None, "missing approval evidence field '{}'".format(f)
+        return status, None
+    status = (_flex_field(text or "", "Status") or "").strip().upper()
+    if status in CR_AUTHORIZING_STATUSES:
+        return status, None
+    return None, "status '{}' does not authorize Specs changes".format(status)
+
+
+def cr_authorizing_ids(root):
+    """{CR-NNN, ...} for every canonical CR record under docs/pmo/cr (or the
+    legacy docs/pmo/change-requests) that is APPROVED or INCORPORATED and
+    well-formed. DRAFT / PM_REVIEW / PENDING_CLIENT_DECISION / REJECTED /
+    DEFERRED / CANCELLED / malformed records never authorize."""
+    found = set()
+    for rel in ("docs/pmo/cr", "docs/pmo/change-requests"):
+        d = os.path.join(root, *rel.split("/"))
+        if not os.path.isdir(d):
+            continue
+        for name in os.listdir(d):
+            m = CR_FILE_RE.match(name)
+            if not m:
+                continue
+            cid = "CR-" + m.group(1)
+            status, _err = cr_record_authorization(read_text(os.path.join(d, name)) or "", cid)
+            if status:
+                found.add(cid)
+    return found
 
 
 def read_cr_fields(root, cr_id):
@@ -1267,6 +1337,8 @@ def validate_incorporated_gate(root, old_status, fields, cr_id, marker_data):
                 "CR '{}' is missing '{}' - incomplete approval evidence "
                 "cannot be incorporated.".format(cr_id, field),
             )
+    if marker_data.get("lifecycle") == NO_SCOPE_LIFECYCLE:
+        return _validate_incorporated_gate_no_scope(root, fields, cr_id, marker_data)
     changelog_content = read_text(os.path.join(root, *CHANGE_LOG_POSIX.split("/")))
     row = find_changelog_row_for_cr(changelog_content, cr_id) if changelog_content else None
     if row is None:
@@ -1320,6 +1392,49 @@ def validate_incorporated_gate(root, old_status, fields, cr_id, marker_data):
             "Change Log entry id ('{}').".format(
                 cr_id, chg_ref, row.get("CHG ID", "")),
         )
+    return None
+
+
+def no_scope_history_reference(version):
+    """The Change Log Reference a NO_SCOPE CR carries: the authoritative
+    change-history model for NEW projects is the Specification Change History
+    row of the resulting Specs version."""
+    return "Specs Change History v{}".format(version)
+
+
+def _validate_incorporated_gate_no_scope(root, fields, cr_id, marker_data):
+    spec_version, specs_content = read_specs_spec_version(root)
+    target = str(marker_data.get("target_specs_version"))
+    if spec_version is None or spec_version.strip() != target:
+        return deny(
+            "PMO-CR-GUARD-015",
+            "CR '{}' target Spec Version ('{}') does not match the actual "
+            "specs.md Spec Version ('{}').".format(cr_id, target, spec_version))
+    if not specs_content or not content_has_change_source(specs_content, cr_id):
+        return deny(
+            "PMO-CR-GUARD-016",
+            "CR '{}' specs.md does not carry a 'Change Source: {}' "
+            "tag.".format(cr_id, cr_id))
+    row_ok = False
+    for line in specs_content.splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")] if line.strip().startswith("|") else []
+        if len(cells) >= 6 and cells[0] == target and cr_id in cells[2]:
+            row_ok = True
+            break
+    if not row_ok:
+        return deny(
+            "PMO-CR-GUARD-017",
+            "CR '{}' has no Specification Change History row for Spec Version "
+            "{}.".format(cr_id, target))
+    if not fields.get("Incorporated Date", "").strip():
+        return deny(
+            "PMO-CR-GUARD-018",
+            "CR '{}' must set Incorporated Date when becoming INCORPORATED.".format(cr_id))
+    if fields.get("Change Log Reference", "").strip() != no_scope_history_reference(target):
+        return deny(
+            "PMO-CR-GUARD-017",
+            "CR '{}' Change Log Reference ('{}') must be '{}'.".format(
+                cr_id, fields.get("Change Log Reference", ""), no_scope_history_reference(target)))
     return None
 
 
@@ -1377,6 +1492,11 @@ def register_is_feedback_safe(content):
 # --------------------------------------------------------------------------- #
 
 def validate_scope_write(tool_name, tool_input, root, rel, state, marker_data, marker_err):
+    if state == "OPEN" and (marker_data or {}).get("lifecycle") == NO_SCOPE_LIFECYCLE:
+        return deny(
+            "PMO-CR-GUARD-031",
+            "this NO_SCOPE (new lifecycle) Change Request incorporation never "
+            "creates or edits Scope - Scope is not part of the new lifecycle.")
     if state != "OPEN" or marker_data.get("operation") != "INCORPORATION":
         return deny(
             "PMO-CR-GUARD-012",
@@ -1512,6 +1632,13 @@ def validate_specs_write(tool_name, tool_input, root, state, marker_data, marker
     # -- Ordinary direct mutation remains prohibited unconditionally; only -#
     # -- a valid OPEN CR-INCORPORATION transaction may write it. Byte-for- -#
     # -- byte the pre-existing rule - unchanged by INITIAL_SPECS_CREATION. -#
+    if state == "OPEN" and (marker_data or {}).get("lifecycle") == NO_SCOPE_LIFECYCLE \
+            and marker_data.get("operation") == "INCORPORATION":
+        return deny(
+            "PMO-CR-GUARD-032",
+            "a NO_SCOPE Change Request incorporation is applied by the "
+            "deterministic incorporator from the approved plan; specs.md is "
+            "not written through Write/Edit.")
     if state != "OPEN" or marker_data.get("operation") != "INCORPORATION":
         return deny(
             "PMO-CR-GUARD-013",
@@ -1556,6 +1683,12 @@ def validate_specs_write(tool_name, tool_input, root, state, marker_data, marker
 
 
 def validate_change_log_write(tool_name, tool_input, root, rel, state, marker_data, marker_err):
+    if state == "OPEN" and (marker_data or {}).get("lifecycle") == NO_SCOPE_LIFECYCLE:
+        return deny(
+            "PMO-CR-GUARD-031",
+            "this NO_SCOPE (new lifecycle) Change Request incorporation has no "
+            "standalone Change Log - the Specification Change History is the "
+            "single change-history model.")
     if rel != CHANGE_LOG_POSIX:
         return deny(
             "PMO-CR-GUARD-014",
@@ -1735,13 +1868,10 @@ def next_change_log_id(root):
     return "CHG-{:03d}".format(max_n + 1)
 
 
-def run_begin_preconditions(root, cr_id, project_id_hint=None):
-    """The BEGIN checklist. Returns (decision, plan): decision is None and
-    plan is a populated dict on success; decision is a Decision and plan is
-    None on failure. Pure read-only - never mutates anything, regardless of
-    outcome. This is the single implementation the CLI's `begin` and
-    `--dry-run` both call - dry-run simply never proceeds to write the
-    marker afterwards."""
+def validate_cr_for_incorporation(root, cr_id, project_id_hint=None):
+    """Shared BEGIN checks that do not depend on the lifecycle (identity, CR
+    exists / APPROVED / approval evidence / origin provenance). Returns
+    (decision, ctx); ctx = {pid, cr_relpath, fields, origin}."""
     config = load_config(root)
     if config is None:
         return deny("PMO-CR-INTEGRATE-024",
@@ -1796,6 +1926,20 @@ def run_begin_preconditions(root, cr_id, project_id_hint=None):
     prov = validate_provenance(root, fields, cr_id)
     if prov is not None:
         return deny("PMO-CR-INTEGRATE-004", prov.message), None
+    return None, {"pid": pid, "cr_relpath": cr_relpath, "fields": fields, "origin": origin}
+
+
+def run_begin_preconditions(root, cr_id, project_id_hint=None):
+    """The BEGIN checklist. Returns (decision, plan): decision is None and
+    plan is a populated dict on success; decision is a Decision and plan is
+    None on failure. Pure read-only - never mutates anything, regardless of
+    outcome. This is the single implementation the CLI's `begin` and
+    `--dry-run` both call - dry-run simply never proceeds to write the
+    marker afterwards."""
+    decision, ctx = validate_cr_for_incorporation(root, cr_id, project_id_hint)
+    if decision is not None:
+        return decision, None
+    pid, cr_relpath, fields, origin = ctx["pid"], ctx["cr_relpath"], ctx["fields"], ctx["origin"]
 
     latest = latest_scope_version(root)
     if latest is None:

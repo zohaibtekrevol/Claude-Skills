@@ -112,6 +112,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 # Specs-entry gate (PMO-SPEC-021/022/023) delegates entirely to this shared
 # module - this hook never re-implements Q&A validation.
 import qa_register_core as qac  # noqa: E402
+import change_request_incorporation_core as crcore  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -1547,21 +1548,11 @@ def known_feedback_ids(root):
 
 
 def approved_cr_ids(root):
-    found = set()
-    for rel in CR_DIRS:
-        d = os.path.join(root, rel)
-        if not os.path.isdir(d):
-            continue
-        for name in os.listdir(d):
-            path = os.path.join(d, name)
-            txt = read_text(path) or ""
-            ids = set(re.findall(r"CR-\d+", name + " " + txt, re.I))
-            status = norm_token(_field(txt, "Status")
-                                or _field(txt, "CR Status")
-                                or _field(txt, "Disposition"))
-            if status in ("APPROVED", "ACCEPTED"):
-                found |= {i.upper() for i in ids}
-    return found
+    """CR ids that may authorize (or remain the Change Source of) Specs
+    content: canonical CR records that are APPROVED or INCORPORATED and
+    well-formed. Delegates to the CR core's structural parser (never
+    string-splits a table row)."""
+    return crcore.cr_authorizing_ids(root)
 
 
 def validate_change_provenance(fr_blocks, nfr_blocks, feedback_ids=None,

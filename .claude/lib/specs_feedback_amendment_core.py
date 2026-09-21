@@ -770,8 +770,8 @@ def approved_baseline_gate(root, specs_text):
     return None
 
 
-def concurrency_gate(root):
-    if crc.cr_marker_status(root)[0] == "OPEN":
+def concurrency_gate(root, ignore_cr_marker=False):
+    if not ignore_cr_marker and crc.cr_marker_status(root)[0] == "OPEN":
         return deny("PMO-FB-AMEND-013", "a Change Request transaction is open.")
     if crc.feedback_marker_is_open(root):
         return deny("PMO-FB-AMEND-013", "a Feedback-management transaction is open.")
@@ -950,6 +950,17 @@ def _write_all(root, writes, removals=(), moves=()):
         raise
 
 
+def archive_targets(root, version, specs_sha256):
+    """(baseline_archive_path, approval_archive_path) for the PREVIOUS approved
+    baseline of `version` with content hash `specs_sha256`. Shared by every
+    mechanism that supersedes an approved baseline (Feedback amendment and
+    no-Scope CR incorporation), so archival is one pattern, not two."""
+    sha12 = specs_sha256[:12]
+    return (os.path.join(root, ".pmo", "baselines", "specs-v{}-{}.md".format(version, sha12)),
+            os.path.join(root, ".pmo", "approvals", "history",
+                         "specs-approval-v{}-{}.yaml".format(version, sha12)))
+
+
 def finalize_amendment(root, marker_data):
     """Re-derive everything from disk; write only when the complete result
     validates. Returns (report, Decision|None)."""
@@ -968,12 +979,9 @@ def finalize_amendment(root, marker_data):
         files, d = _close_feedback(root, rec, note, date_iso)
         if d is not None:
             return None, d
-        sha12 = marker_data["specs_hash_before"][:12]
         ver = marker_data["spec_version_before"]
-        base_archive = os.path.join(root, ".pmo", "baselines", "specs-v{}-{}.md".format(ver, sha12))
+        base_archive, approval_archive = archive_targets(root, ver, marker_data["specs_hash_before"])
         approval = sac.approval_abspath(root)
-        approval_archive = os.path.join(root, ".pmo", "approvals", "history",
-                                        "specs-approval-v{}-{}.yaml".format(ver, sha12))
         writes = {specs_path: res["candidate"], base_archive: before}
         writes.update(files)
         moves = [(approval, approval_archive)]

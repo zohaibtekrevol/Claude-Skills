@@ -99,6 +99,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
+import cr_no_scope_incorporation_core as nsc  # noqa: E402
 from change_request_incorporation_core import (  # noqa: E402
     CR_MARKER_RELPATH_PARTS,
     MARKER_STATUS_TRANSITIONS,
@@ -168,13 +169,20 @@ def _try_transition_marker(root, old_data, new_status):
 # Commands
 # --------------------------------------------------------------------------- #
 
-def cmd_begin(root, cr_id, project_id_hint=None, dry_run=False):
+def _load_plan_file(path):
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def cmd_begin(root, cr_id, project_id_hint=None, dry_run=False, changes_path=None, plan=None):
     """Runs the full BEGIN precondition checklist (read-only). On PASS and
     not --dry-run, writes the transaction marker. Never generates
     Scope/Specs/Change Log content - `plan` only reports what already
     exists (the approved CR's own fields) plus deterministically computed
     target versions/ids."""
     result = _new_result("begin", cr_id)
+    if nsc.is_no_scope_project(root):
+        return _begin_no_scope(root, cr_id, project_id_hint, dry_run, changes_path, plan, result)
     decision, plan = run_begin_preconditions(root, cr_id, project_id_hint)
     if decision is not None:
         if decision.code == "PMO-CR-INTEGRATE-021":
@@ -193,6 +201,57 @@ def cmd_begin(root, cr_id, project_id_hint=None, dry_run=False):
     result["marker"] = marker_data
     result["status"] = "ACTIVE"
     return result
+
+
+def _begin_no_scope(root, cr_id, project_id_hint, dry_run, changes_path, plan, result):
+    """NEW (no-Scope) lifecycle: incorporate into the approved Specs only."""
+    if plan is None and changes_path:
+        try:
+            plan = _load_plan_file(changes_path)
+        except Exception as exc:
+            return _fail(result, deny("PMO-CR-NOSCOPE-010", "the incorporation plan could not be read ({}).".format(exc)))
+    decision, mp = nsc.run_begin(root, cr_id, plan, project_id_hint)
+    if decision is not None:
+        if decision.code == "PMO-CR-INTEGRATE-021":
+            result["status"] = "NO_CHANGE"
+            result["decision"] = {"code": decision.code, "message": decision.message}
+            return result
+        return _fail(result, decision)
+    summary = {k: v for k, v in mp.items() if k not in ("candidate", "plan")}
+    summary["lifecycle"] = "NO_SCOPE"
+    result["plan"] = summary
+    if dry_run:
+        result["status"] = "DRY_RUN_PASS"
+        return result
+    marker_data = nsc.build_marker(mp, _new_transaction_id(), _now_iso())
+    write_text(_marker_path(root), json.dumps(marker_data, indent=2))
+    result["marker"] = marker_data
+    result["status"] = "ACTIVE"
+    return result
+
+
+def cmd_abort(root, cr_id, reason):
+    """Governed recovery for an unfinished NO_SCOPE incorporation: clears only
+    the marker, only while specs.md still matches the hash recorded at begin.
+    The legacy Scope path keeps its existing recovery semantics."""
+    result = _new_result("abort", cr_id)
+    data = _load_marker_for(root, cr_id, result)
+    if data is None:
+        return result
+    if data.get("lifecycle") != "NO_SCOPE":
+        return _fail(result, deny("PMO-CR-NOSCOPE-020", "abort applies only to a NO_SCOPE incorporation; the legacy Scope transaction keeps its existing recovery flow."))
+    report, decision = nsc.abort(root, data, reason)
+    if decision is not None:
+        return _fail(result, decision)
+    result["report"] = report
+    result["status"] = "ABORTED"
+    return result
+
+
+def _reconcile_for(root, data):
+    if data.get("lifecycle") == "NO_SCOPE":
+        return nsc.reconcile(root, data)
+    return reconcile_transaction(root, data)
 
 
 def cmd_status(root, cr_id=None):
@@ -217,7 +276,7 @@ def cmd_status(root, cr_id=None):
         result["status"] = "DIFFERENT_CR_ACTIVE"
         return result
 
-    decision, report = reconcile_transaction(root, data)
+    decision, report = _reconcile_for(root, data)
     result["report"] = report
     if decision is None:
         result["status"] = "RECONCILED"
@@ -264,7 +323,7 @@ def cmd_validate(root, cr_id):
     if data is None:
         return result
 
-    decision, report = reconcile_transaction(root, data)
+    decision, report = _reconcile_for(root, data)
     result["report"] = report
     if decision is None:
         result["status"] = "PASS"
@@ -291,7 +350,10 @@ def cmd_finalize(root, cr_id, actor="change-request-incorporator",
     if data is None:
         return result
 
-    decision, report = finalize_transaction(root, data, actor, _now_iso()[:10], reason)
+    if data.get("lifecycle") == "NO_SCOPE":
+        decision, report = nsc.finalize(root, data, actor, _now_iso()[:10], reason)
+    else:
+        decision, report = finalize_transaction(root, data, actor, _now_iso()[:10], reason)
     result["report"] = report
     if decision is not None:
         if decision.code == "PMO-CR-INTEGRATE-021":
@@ -306,6 +368,8 @@ def cmd_finalize(root, cr_id, actor="change-request-incorporator",
     except Exception:
         pass
     result["status"] = "INCORPORATED"
+    if data.get("lifecycle") == "NO_SCOPE":
+        result["pm_message"] = nsc.pm_message("incorporated", report)
     return result
 
 
@@ -332,6 +396,10 @@ def build_arg_parser():
                                      "transaction marker.")
     b.add_argument("--cr", required=True, dest="cr_id")
     b.add_argument("--project", default=None, dest="project_id")
+    b.add_argument("--changes", default=None, dest="changes_path",
+                   help="NEW (no-Scope) lifecycle only: JSON incorporation plan "
+                        "prepared from the approved CR (see "
+                        "cr_no_scope_incorporation_core.py).")
     b.add_argument("--dry-run", action="store_true",
                    help="Report eligibility/targets only; never writes the "
                         "marker or any project file.")
@@ -344,6 +412,11 @@ def build_arg_parser():
                                         "the Skill's governed Scope/Specs/"
                                         "Change Log edits.")
     v.add_argument("--cr", required=True, dest="cr_id")
+
+    a = sub.add_parser("abort", help="NEW (no-Scope) lifecycle: clear an "
+                                     "unfinished transaction's marker.")
+    a.add_argument("--cr", required=True, dest="cr_id")
+    a.add_argument("--reason", required=True)
 
     f = sub.add_parser("finalize", help="Re-validate and, only on PASS, "
                                         "flip the CR to INCORPORATED and "
@@ -358,7 +431,7 @@ def build_arg_parser():
 _TERMINAL_OK_STATUSES = {
     "ACTIVE", "DRY_RUN_PASS", "PASS", "RECONCILED", "INCORPORATED",
     "NO_CHANGE", "ALREADY_INCORPORATED", "NO_TRANSACTION",
-    "DIFFERENT_CR_ACTIVE", "IN_PROGRESS", "RECONCILING",
+    "DIFFERENT_CR_ACTIVE", "IN_PROGRESS", "RECONCILING", "ABORTED",
 }
 
 
@@ -373,7 +446,10 @@ def run(command, root=None, **kwargs):
         root = root or locate_project_root(os.getcwd())
         if command == "begin":
             return cmd_begin(root, kwargs["cr_id"], kwargs.get("project_id"),
-                             kwargs.get("dry_run", False))
+                             kwargs.get("dry_run", False), kwargs.get("changes_path"),
+                             kwargs.get("plan"))
+        if command == "abort":
+            return cmd_abort(root, kwargs["cr_id"], kwargs.get("reason"))
         if command == "status":
             return cmd_status(root, kwargs.get("cr_id"))
         if command == "validate":
@@ -407,7 +483,9 @@ def main(argv=None):
     root = args.root
     if args.command == "begin":
         result = run("begin", root, cr_id=args.cr_id, project_id=args.project_id,
-                    dry_run=args.dry_run)
+                    dry_run=args.dry_run, changes_path=args.changes_path)
+    elif args.command == "abort":
+        result = run("abort", root, cr_id=args.cr_id, reason=args.reason)
     elif args.command == "status":
         result = run("status", root, cr_id=args.cr_id)
     elif args.command == "validate":

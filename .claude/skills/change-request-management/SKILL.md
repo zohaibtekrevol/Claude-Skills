@@ -592,6 +592,47 @@ finished — see Section 24 for what happens when it does not.
 
 ---
 
+## 19a. NEW-lifecycle (no-Scope) incorporation
+
+A project with no `docs/pmo/scope/` artifact (the active lifecycle for new
+projects) incorporates an APPROVED CR directly into the approved Specs. The
+route is chosen deterministically by the presence of a Scope artifact - legacy
+Scope projects keep Sections 19-22 exactly as written.
+
+- **Authorization chain:** approved baseline (Specs + matching approval, published
+  or not) + canonical APPROVED CR. `APPROVED` and later `INCORPORATED` CRs both
+  remain valid `Change Source` for the resulting Specs (the CR record is parsed
+  structurally; DRAFT / PM_REVIEW / PENDING_CLIENT_DECISION / REJECTED / DEFERRED /
+  CANCELLED / malformed records never authorize).
+- **One change-history model:** the Specification Change History row of the new
+  version (Change Source = CR id, changed ids, summary, approval state). No Scope
+  version and no standalone Change Log are created; the CR carries
+  `Change Log Reference: Specs Change History vX.Y`, `Incorporated Date` and
+  `Target Spec Version`. Scope / Change Log / Write-Edit Specs writes are denied
+  during the transaction (`PMO-CR-GUARD-031/032`).
+- **Content is authored, not invented:** this Skill prepares a JSON plan from the CR's
+  own Proposed Change (`add_requirement` blocks and `set_field` changes for
+  requirements listed in the CR's Affected Requirements). Unknown details are
+  `NOT_SPECIFIED` / `PENDING_DECISION` per the FR schema policy. CR-level open
+  decisions stay in the CR (they never become Q&A automatically); only a non-empty
+  `Blocking Open Decisions` field blocks incorporation.
+- **Transaction:** `change-request-incorporator.py begin --cr CR-nnn --changes plan.json`
+  -> `validate` -> `finalize` (or `abort`). The deterministic core applies the plan to a
+  copy, proves the diff is confined to the authorized requirements plus the version,
+  `Execution Authorized` and one history row, validates the candidate with
+  `full_spec_validation`, then writes atomically: amended Specs (next minor version,
+  `Execution Authorized: false`), archive of the previous approved bytes and previous
+  approval (history, never deleted), CR -> INCORPORATED, register row. Any failure rolls
+  everything back.
+- **After incorporation:** the Specs are a fresh review candidate (lifecycle
+  `BASELINE_READY_FOR_APPROVAL`); PM reapproval uses the normal Specs approval recorder for
+  the new version/hash; the previous publication receipt stays as history and never
+  satisfies the new version; publication is a separate explicit step.
+- **PM wording:** "CR approved. I incorporated the approved changes into Specs v0.2. The
+  updated Specs now require your approval." - no guard names, transaction ids or paths.
+
+---
+
 ## 20. Scope behavior
 
 - Scope remains **multi-version and append-only**. Approved CR incorporation
