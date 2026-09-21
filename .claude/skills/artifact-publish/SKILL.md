@@ -742,6 +742,35 @@ the state-change half of that request and complete only the transport.
 
 ---
 
+## 22a. Publication receipts and reconciliation
+
+A verified publication is recorded as canonical local evidence so the
+lifecycle never has to guess (and never calls the network):
+
+- After a successful, remotely verified publish of a versioned artifact the
+  publisher writes an immutable **publication receipt** to
+  `.pmo/publications/<family>-v<version>-<sha256[:12]>.yaml` (project,
+  family, artifact path, version, artifact sha256, provider/workspace/
+  repository/branch, remote commit, timestamp, `status: PUBLISHED`,
+  `remote_verified: true`, evidence source). It holds no artifact content and
+  never replaces the approved artifact as the source of truth. Earlier
+  receipts are kept as history.
+- The lifecycle treats an approved baseline as published only when a receipt
+  matches the CURRENT project, artifact, version, sha256 and repository/branch
+  (`publication_evidence_core.py`). A receipt for an earlier version or
+  different bytes never satisfies a newer approved artifact, which becomes
+  `PUBLICATION_READY` again on its own.
+- The artifact version comes from the artifact's own document control (the
+  authoritative parser), not from `project-config.yaml`; the commit message is
+  `PMO: publish <project> <family> v<version>` (no version -> no `v...`).
+- `--reconcile [--write-receipt]` records a publication that already exists
+  (published before receipts existed, or whose receipt could not be written).
+  It never publishes: it requires the remote branch head, the remote blob at the
+  artifact path and the commit that introduced it to prove the approved bytes
+  are already there, and refuses (`PMO-PUBLISH-017`) otherwise.
+
+---
+
 ## 23. Report — PMO ARTIFACT PUBLISH RESULT
 
 On completion of every run (success, `NO_CHANGES_TO_PUBLISH`, or a `BLOCK`,

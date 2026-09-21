@@ -16,6 +16,10 @@ already-authoritative validator - never re-implemented:
 * ``specs_approval_core.py``             - Specs approval record validity
 * ``change_request_incorporation_core.py`` - CR/Feedback transaction state
 * ``artifact_publish_core.py``           - repository-binding field presence
+* ``publication_evidence_core.py``       - local publication receipts (an
+  already-approved baseline counts as PUBLISHED only when a valid receipt
+  proves THIS version/hash was published to the project's current
+  repository/branch; no network access, ever)
 
 If a state this module reports would ever disagree with what the
 corresponding guard would say about the exact same on-disk artifacts, that
@@ -66,6 +70,7 @@ import qa_register_core as qac  # noqa: E402
 import change_request_incorporation_core as crc  # noqa: E402
 import artifact_publish_core as apc  # noqa: E402
 import specs_approval_core as sac  # noqa: E402
+import publication_evidence_core as pev  # noqa: E402
 
 
 def _load_hook_module(name, filename):
@@ -281,6 +286,30 @@ def _detect_crs(root):
             approved_ids.append(cr_id)
     return review_ids, approved_ids, _diag(
         total_cr_files=len(_list_cr_ids(root)))
+
+
+def _detect_publication_evidence(root):
+    """(published: bool, diag). True only when a structurally valid publication
+    receipt proves the CURRENT approved Specs (same project, path, version,
+    sha256, repository and branch) was published and remotely verified. A
+    receipt for an earlier version/content is history, never current proof."""
+    specs_path = os.path.join(root, *sac.SPECS_POSIX.split("/"))
+    try:
+        with open(specs_path, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return False, _diag(reason="approved Specs not readable")
+    text = data.decode("utf-8", "replace")
+    cfg = iac.load_project_config(root) or {}
+    version = pev.artifact_version("specs", text, cfg)
+    sha = pev.sha256_bytes(data)
+    receipt, rdiag = pev.find_valid_publication(root, "specs", sac.SPECS_POSIX, version, sha)
+    if receipt is None:
+        return False, _diag(version=version, artifact_sha256=sha, receipts=rdiag)
+    return True, _diag(version=version, artifact_sha256=sha,
+                       remote_commit=receipt.get("remote_commit"),
+                       published_at=receipt.get("published_at"),
+                       branch=receipt.get("branch"), receipts=rdiag)
 
 
 def _detect_publication_eligibility(root):
@@ -503,14 +532,22 @@ def _get_project_state_unsafe(root):
         )
 
     publishable, pub_diag = _detect_publication_eligibility(root)
+    published, evidence_diag = (False, None)
+    if publishable:
+        published, evidence_diag = _detect_publication_evidence(root)
+        pub_diag = dict(pub_diag, evidence=evidence_diag)
+    # Already-published baseline: steady state (BASELINE_APPROVED / SHOW_STATUS).
+    # Further change enters through Feedback / Change Request, and a new
+    # approved version is unpublished again until it has its own receipt.
+    ready = publishable and not published
     return _build_result(
-        root, LifecycleState.PUBLICATION_READY if publishable else LifecycleState.BASELINE_APPROVED,
-        health="Ready" if publishable else "Baseline Approved",
+        root, LifecycleState.PUBLICATION_READY if ready else LifecycleState.BASELINE_APPROVED,
+        health=("Ready" if ready else ("Baseline Published" if published else "Baseline Approved")),
         needs_pm_attention=False,
         decision_count=len(decisions), deferred_decision_count=len(deferred),
         requirement_count=fr_count, specs_status="PROVISIONAL",
         baseline_status="Approved",
-        publication_status="Eligible" if publishable else "Not Configured",
+        publication_status=("Eligible" if ready else ("Published" if published else "Not Configured")),
         engineering=_diag(intent=intent_diag, qa=qa_diag, specs=specs_diag,
                           publication=pub_diag),
     )

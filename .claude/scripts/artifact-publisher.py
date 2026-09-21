@@ -54,6 +54,7 @@ Python 3, standard library only. No third-party dependencies.
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import shutil
@@ -63,6 +64,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
 import artifact_publish_core as core  # noqa: E402  (path setup must precede this)
+import publication_evidence_core as pev  # noqa: E402
 
 
 FAMILIES = ("intent", "scope", "specs", "feedback", "change-request")
@@ -76,17 +78,15 @@ def _project_name(cfg):
     return core.extract_project_name(cfg)
 
 
-def _artifact_version(family, cfg):
-    artifacts = cfg.get("artifacts") if isinstance(cfg, dict) else None
-    if not isinstance(artifacts, dict):
-        return "unknown"
-    key = {"intent": "intent", "specs": "specifications", "scope": "scope"}.get(family)
-    sub = artifacts.get(key) if key else None
-    if not isinstance(sub, dict):
-        return "unknown"
-    if family == "scope":
-        return core._clean(sub.get("approved_version")) or core._clean(sub.get("latest_version")) or "unknown"
-    return core._clean(sub.get("latest_version")) or "unknown"
+def _artifact_version(family, cfg, src=None):
+    """Version of the artifact being published, read from the ARTIFACT'S OWN
+    document control through the authoritative parser (publication_evidence_core
+    .artifact_version); project-config is only a legacy fallback."""
+    text = None
+    if src and os.path.isfile(src):
+        with open(src, encoding="utf-8") as fh:
+            text = fh.read()
+    return pev.artifact_version(family, text, cfg)
 
 
 def _new_result():
@@ -105,6 +105,7 @@ def _new_result():
         "commit_hash": None,
         "pushed": False,
         "remote_verified": None,
+        "receipt": None,
     }
 
 
@@ -264,7 +265,8 @@ def _git_reset_mixed(ws):
     core._run_git(["git", "-C", ws, "reset", "--mixed", "HEAD", "--"])
 
 
-def _execute_publish(result, ws, fields, relpath, src, dst, src_hash, project_name, family, version):
+def _execute_publish(result, ws, fields, relpath, src, dst, src_hash, project_name, family, version,
+                     engine_root=None, project_id=None):
     """Fail-closed wrapper: any unexpected exception during the mutating
     transaction (copy / hash / stage / commit) is converted into a clean
     PMO-PUBLISH-015 Decision, with a best-effort rollback of the
@@ -279,6 +281,7 @@ def _execute_publish(result, ws, fields, relpath, src, dst, src_hash, project_na
         return _execute_publish_inner(
             result, ws, fields, relpath, src, dst, src_hash, project_name,
             family, version, baseline_existed, baseline_bytes,
+            engine_root, project_id,
         )
     except Exception as exc:  # noqa: BLE001 - fail closed
         _rollback_copy(dst, baseline_existed, baseline_bytes)
@@ -291,7 +294,7 @@ def _execute_publish(result, ws, fields, relpath, src, dst, src_hash, project_na
 
 def _execute_publish_inner(result, ws, fields, relpath, src, dst, src_hash,
                             project_name, family, version, baseline_existed,
-                            baseline_bytes):
+                            baseline_bytes, engine_root=None, project_id=None):
     try:
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copyfile(src, dst)
@@ -333,7 +336,9 @@ def _execute_publish_inner(result, ws, fields, relpath, src, dst, src_hash,
             "transaction ({}).".format(staged, relpath),
         ))
 
-    message = "PMO: publish {} {} v{}".format(project_name, family, version)
+    message = ("PMO: publish {} {} v{}".format(project_name, family, version)
+               if version and version != "unknown"
+               else "PMO: publish {} {}".format(project_name, family))
     commit = core._run_git(["git", "-C", ws, "commit", "-m", message])
     if commit is None or commit.returncode != 0:
         _git_reset_mixed(ws)
@@ -382,6 +387,97 @@ def _execute_publish_inner(result, ws, fields, relpath, src, dst, src_hash,
 
     result["status"] = "PUBLISHED"
     result["decision"] = None
+    _record_receipt(result, engine_root, project_id, family, relpath, version,
+                    src_hash, fields, commit_hash, "PUBLISHER_TRANSACTION",
+                    _now_utc())
+    return result
+
+
+def _now_utc():
+    return datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _record_receipt(result, engine_root, project_id, family, relpath, version,
+                    src_hash, fields, remote_commit, evidence_source, published_at):
+    """Write the publication receipt for a VERIFIED remote publication. The
+    publication itself already succeeded - a receipt failure is reported
+    loudly (PMO-PUBLISH-016) but never disguised, and never rolls back or
+    rewrites the remote publication."""
+    if not (engine_root and project_id and version and version != "unknown"):
+        result["receipt"] = {"written": False, "reason": "no versioned artifact identity"}
+        return
+    receipt = pev.build_receipt(project_id, family, relpath, version, src_hash,
+                                fields, remote_commit, published_at, evidence_source)
+    path, err = pev.write_receipt(engine_root, receipt)
+    if err:
+        result["receipt"] = {"written": False, "reason": err}
+        result["status"] = "PUBLISHED_RECEIPT_FAILED"
+        result["decision"] = core.deny(
+            "PMO-PUBLISH-016",
+            "RECEIPT_WRITE_FAILED: the remote publication succeeded and was "
+            "verified, but its local publication receipt could not be written "
+            "({}). Run `--reconcile --write-receipt` to record it.".format(err))
+        return
+    result["receipt"] = {"written": True, "path": path, "remote_commit": remote_commit,
+                         "artifact_sha256": src_hash, "version": version}
+
+
+def _git_out(ws, args):
+    r = core._run_git(["git", "-C", ws] + args)
+    return r.stdout.strip() if (r is not None and r.returncode == 0) else None
+
+
+def _reconcile(result, ws, fields, relpath, src, src_hash, project_id, family,
+               version, engine_root, write):
+    """Governed reconciliation for a publication that already happened
+    (before receipts existed, or whose receipt could not be written). It
+    NEVER publishes. It records a receipt only from live, independently
+    verifiable remote evidence: the remote branch head, the remote blob at
+    `relpath` equal to the approved source's blob, and the remote commit that
+    introduced exactly those bytes (with its own commit time)."""
+    branch = fields["working_branch"]
+    if version == "unknown":
+        return _fail(result, core.deny(
+            "PMO-PUBLISH-017", "RECONCILE_REFUSED: the artifact version cannot be determined."))
+    remote_url = core.git_remote_get_url(ws, "origin")
+    rc, out, _e = core.run_ls_remote_heads(remote_url, branch)
+    remote_sha = out.strip().split()[0] if (rc == 0 and out.strip()) else None
+    fetch = core._run_git(["git", "-C", ws, "fetch", "origin", branch])
+    local_remote_head = _git_out(ws, ["rev-parse", "origin/" + branch])
+    if fetch is None or fetch.returncode != 0 or not remote_sha or remote_sha != local_remote_head:
+        return _fail(result, core.deny(
+            "PMO-PUBLISH-017",
+            "RECONCILE_REFUSED: the remote branch head could not be verified "
+            "(remote={}, fetched={}).".format(remote_sha, local_remote_head)))
+    src_blob = _git_out(ws, ["hash-object", "--", src])
+    remote_blob = _git_out(ws, ["rev-parse", "origin/{}:{}".format(branch, relpath)])
+    if not src_blob or src_blob != remote_blob:
+        return _fail(result, core.deny(
+            "PMO-PUBLISH-017",
+            "RECONCILE_REFUSED: the remote '{}' does not contain exactly the "
+            "approved artifact bytes.".format(relpath)))
+    commit = _git_out(ws, ["log", "-n1", "--format=%H", "origin/" + branch, "--", relpath])
+    ts = _git_out(ws, ["log", "-n1", "--format=%ct", "origin/" + branch, "--", relpath])
+    at_commit = _git_out(ws, ["rev-parse", "{}:{}".format(commit or "HEAD", relpath)]) if commit else None
+    if not commit or not ts or at_commit != src_blob:
+        return _fail(result, core.deny(
+            "PMO-PUBLISH-017",
+            "RECONCILE_REFUSED: no remote commit introducing exactly these bytes "
+            "could be identified."))
+    published_at = datetime.datetime.utcfromtimestamp(int(ts)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    receipt = pev.build_receipt(project_id, family, relpath, version, src_hash, fields,
+                                commit, published_at, "RECONCILED_FROM_REMOTE")
+    result["receipt"] = {"written": False, "preview": receipt}
+    if not write:
+        result["status"] = "RECONCILE_READY"
+        return result
+    path, err = pev.write_receipt(engine_root, receipt)
+    if err:
+        return _fail(result, core.deny("PMO-PUBLISH-016", "RECEIPT_WRITE_FAILED: {}".format(err)))
+    result["receipt"] = {"written": True, "path": path, "remote_commit": commit,
+                         "artifact_sha256": src_hash, "version": version,
+                         "evidence_source": "RECONCILED_FROM_REMOTE"}
+    result["status"] = "RECONCILED"
     return result
 
 
@@ -485,7 +581,7 @@ def _run_inner(result, family, mode, root, home, clone_url_override):
     src_hash = core.sha256_of_file(src)
     dst_hash = core.sha256_of_file(dst) if os.path.isfile(dst) else None
     classification = "IDENTICAL" if dst_hash == src_hash else ("MODIFY" if dst_hash else "ADD")
-    version = _artifact_version(family, cfg)
+    version = _artifact_version(family, cfg, src)
 
     result["transaction"] = {
         "project": result["project"],
@@ -502,6 +598,19 @@ def _run_inner(result, family, mode, root, home, clone_url_override):
         "managed_workspace": str(ws_path),
     }
 
+    project_id = core._clean(((cfg or {}).get("project") or {}).get("id")) if isinstance(cfg, dict) else None
+
+    if mode in ("reconcile", "reconcile-write"):
+        if classification != "IDENTICAL":
+            return _fail(result, core.deny(
+                "PMO-PUBLISH-017",
+                "RECONCILE_REFUSED: the published copy differs from the approved "
+                "artifact ({}); reconciliation only records a publication that "
+                "already matches byte-for-byte - publish instead.".format(classification)))
+        return _reconcile(result, str(ws_path), fields, relpath, src, src_hash,
+                          project_id, family, version, engine_root,
+                          write=(mode == "reconcile-write"))
+
     if classification == "IDENTICAL":
         result["status"] = "NO_CHANGES_TO_PUBLISH"
         return result
@@ -513,6 +622,7 @@ def _run_inner(result, family, mode, root, home, clone_url_override):
     return _execute_publish(
         result, str(ws_path), fields, relpath, src, dst, src_hash,
         result["project"], family, version,
+        engine_root=engine_root, project_id=project_id,
     )
 
 
@@ -540,15 +650,27 @@ def build_arg_parser():
     mode.add_argument("--publish", action="store_true",
                        help="Execute the publication transaction if a "
                             "genuine change exists.")
+    mode.add_argument("--reconcile", action="store_true",
+                       help="Verify (read-only) that the approved artifact is "
+                            "already published byte-for-byte and preview the "
+                            "publication receipt; never publishes.")
+    p.add_argument("--write-receipt", action="store_true",
+                    help="With --reconcile: write the verified publication "
+                         "receipt to .pmo/publications/.")
     return p
 
 
 def main(argv=None):
     args = build_arg_parser().parse_args(argv)
-    mode = "publish" if args.publish else "dry-run"
+    if args.write_receipt and not args.reconcile:
+        build_arg_parser().error("--write-receipt requires --reconcile")
+    mode = ("publish" if args.publish
+            else ("reconcile-write" if (args.reconcile and args.write_receipt)
+                  else ("reconcile" if args.reconcile else "dry-run")))
     result = run(args.artifact, mode)
     _print_report(result)
-    if result["status"] in ("NO_CHANGES_TO_PUBLISH", "CHANGES_TO_PUBLISH", "PUBLISHED"):
+    if result["status"] in ("NO_CHANGES_TO_PUBLISH", "CHANGES_TO_PUBLISH", "PUBLISHED",
+                            "RECONCILE_READY", "RECONCILED"):
         return 0
     return 1
 
