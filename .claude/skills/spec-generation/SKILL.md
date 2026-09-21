@@ -292,7 +292,7 @@ Repository:           <repository configured in .pmo/project-config.yaml>
 
 On the **NEW** (no-Scope) path (Section 2a), `Scope Version` is **omitted
 entirely** — it is not required and must not be fabricated as `N/A` filler;
-`Generated From` instead names the Q&A register (and/or the Intent):
+`Generated From` instead names the Q&A register:
 
 ```
 Project:              <project.name>
@@ -306,6 +306,22 @@ Last Updated:         <UTC ISO-8601 timestamp>
 Execution Authorized: true | false
 Repository:           <repository configured in .pmo/project-config.yaml>
 ```
+
+**`Generated From` is always exactly one existing file path — nothing
+else.** `specs-governance-guard.py`'s own `validate_source_versions`
+(`PMO-SPEC-017`) checks the field's *entire* cleaned value with
+`os.path.exists` — it does not parse, split, or tolerate a second
+reference, a parenthetical, or descriptive/version text appended inside
+it (e.g. never `docs/pmo/requirements/questions-and-assumptions.md (+
+docs/pmo/intent/intent.md v0.3)` — a value shaped like that fails
+`PMO-SPEC-017` deterministically, even though the register path itself is
+correct). On the NEW path the canonical value is always
+`docs/pmo/requirements/questions-and-assumptions.md` (the Q&A register the
+`requirement-gathering` stage produced) — reused verbatim from
+`qa_register_core.QA_FILE_POSIX`, never re-typed by hand. Intent lineage
+is already carried by the separate `Intent Version` Document Control field
+and by each FR/NFR's own `Source Requirement` trace (Section 12) — it does
+**not** also belong inside the `Generated From` path string.
 
 All identity values (`Project`, `Client`, `Project ID`, `Repository`) are taken
 **verbatim from `.pmo/project-config.yaml`**, never from conversation history. A

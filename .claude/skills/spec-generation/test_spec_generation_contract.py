@@ -307,6 +307,24 @@ def test_02_validation_summary_required_by_guard():
     check("02/not_conditional", entry[2] is False, entry)
 
 
+def test_02b_generated_from_contract_no_longer_ambiguous():
+    """PMO-SPEC-017 root-cause fix: the Skill's own prose used to say
+    'Generated From instead names the Q&A register (and/or the Intent)' -
+    ambiguous wording that directly produced the real WM Trucking defect
+    (a combined path + descriptive text value). The corrected text must
+    state the field is always exactly one existing path and must no longer
+    contain the old ambiguous parenthetical."""
+    text = open(SKILL_MD_PATH, encoding="utf-8").read()
+    check("02b/ambiguous_and_or_intent_phrase_removed",
+          "(and/or the Intent)" not in text)
+    check("02b/single_path_rule_stated",
+          "always exactly one existing file path" in text)
+    check("02b/malformed_example_shown_as_failing",
+          "questions-and-assumptions.md (+" in text and "PMO-SPEC-017` deterministically" in text)
+    check("02b/reuses_qa_file_posix_constant",
+          "qa_register_core.QA_FILE_POSIX" in text)
+
+
 # --------------------------------------------------------------------------- #
 # 2. Full validation before readiness - fail-closed cases
 # --------------------------------------------------------------------------- #
@@ -442,6 +460,7 @@ def main():
     for fn in (
         test_01_skill_required_sections_match_guard,
         test_02_validation_summary_required_by_guard,
+        test_02b_generated_from_contract_no_longer_ambiguous,
         test_03_missing_validation_summary_fails,
         test_04_missing_another_mandatory_section_fails,
         test_05_invalid_document_control_fails,

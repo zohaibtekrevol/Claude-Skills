@@ -495,7 +495,10 @@ def test_25_cr_marker_masquerade_rejected():
         "spec_version": "0.1", "operation": "INCORPORATION", "reason": "r",
         "started_at": "2026-09-19T00:00:00Z", "status": "ACTIVE",
         "pre_repair_validation_code": "PMO-SPEC-003",
-        "pre_repair_validation_message": "m", "permitted_repair_class": ["Validation Summary"],
+        "pre_repair_validation_message": "m",
+        "repair_classes": ["MISSING_REQUIRED_SECTION"],
+        "missing_sections": ["Validation Summary"],
+        "metadata_fixes": {},
         "specs_hash_before": "x"})
     data, err = core.parse_marker(fake)
     check("25b/incorporation_operation_marker_rejected",
@@ -539,6 +542,245 @@ def test_28_already_valid_specs_has_nothing_to_repair():
     try:
         r = cli.cmd_begin(root, "reason")
         check("28/nothing_to_repair", code_of(r) == "PMO-SPEC-REPAIR-005", r)
+    finally:
+        _cleanup(root)
+
+
+def malformed_generated_from_specs(include_validation_summary=True, spec_version="0.1"):
+    """Mirrors the real WM Trucking defect shape exactly: a combined
+    reference + descriptive/version text inside the path field."""
+    text = build_specs(spec_version=spec_version,
+                       include_validation_summary=include_validation_summary)
+    return text.replace(
+        "- **Generated From:** docs/pmo/requirements/questions-and-assumptions.md\n",
+        "- **Generated From:** docs/pmo/requirements/questions-and-assumptions.md "
+        "(+ docs/pmo/intent/intent.md v1.0)\n",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# DOCUMENT_CONTROL_METADATA_REPAIR - positive tests
+# --------------------------------------------------------------------------- #
+
+def test_30_malformed_generated_from_corrected_to_canonical():
+    root = mkroot(specs=malformed_generated_from_specs())
+    try:
+        r1 = cli.cmd_begin(root, "correct malformed Generated From")
+        check("30/begin_active", r1["status"] == "ACTIVE", r1)
+        check("30/repair_class_metadata",
+              core.REPAIR_CLASS_METADATA in r1["plan"]["repair_classes"], r1)
+        r2 = cli.cmd_finalize(root)
+        check("30/finalize_repaired", r2["status"] == "REPAIRED", r2)
+        text = open(os.path.join(root, "docs", "pmo", "specs", "specs.md")).read()
+        check("30/canonical_value_written",
+              "- **Generated From:** docs/pmo/requirements/questions-and-assumptions.md\n" in text,
+              text)
+        check("30/no_descriptive_suffix_remains", "(+ docs/pmo" not in text, text)
+    finally:
+        _cleanup(root)
+
+
+def test_31_generated_from_fix_changes_nothing_substantive():
+    root = mkroot(specs=malformed_generated_from_specs())
+    before = open(os.path.join(root, "docs", "pmo", "specs", "specs.md")).read()
+    try:
+        cli.cmd_begin(root, "reason")
+        cli.cmd_finalize(root)
+        after = open(os.path.join(root, "docs", "pmo", "specs", "specs.md")).read()
+        ok, changed_fields = core.metadata_fix_is_field_only(
+            before, after.split("\n\n---\n\n")[0] if "Validation Summary" in after
+            else after, core.PERMITTED_METADATA_FIELDS)
+        # Compare only up through the (unchanged) pre-existing body - the
+        # Validation Summary append is a separate, already-proven check.
+        check("31/only_generated_from_field_changed",
+              ok and changed_fields == {"Generated From"}, (ok, changed_fields))
+        check("31/fr_block_unchanged", "### FR-001 - Customer places an online order" in after)
+    finally:
+        _cleanup(root)
+
+
+def test_32_both_repair_classes_applied_sequentially():
+    root = mkroot(specs=malformed_generated_from_specs(include_validation_summary=False))
+    try:
+        r1 = cli.cmd_begin(root, "repair both missing section and malformed metadata")
+        check("32/both_classes_detected",
+              set(r1["plan"]["repair_classes"]) ==
+              {core.REPAIR_CLASS_MISSING_SECTION, core.REPAIR_CLASS_METADATA}, r1)
+        r2 = cli.cmd_finalize(root)
+        check("32/finalize_repaired", r2["status"] == "REPAIRED", r2)
+        check("32/report_lists_both_classes",
+              set(r2["report"]["repair_classes"]) ==
+              {core.REPAIR_CLASS_MISSING_SECTION, core.REPAIR_CLASS_METADATA}, r2)
+    finally:
+        _cleanup(root)
+
+
+def test_33_full_validation_passes_after_combined_repair():
+    root = mkroot(specs=malformed_generated_from_specs(include_validation_summary=False))
+    try:
+        cli.cmd_begin(root, "reason")
+        cli.cmd_finalize(root)
+        d = core.specs_guard.full_spec_validation(root)
+        check("33/full_validation_passes", d is None, d)
+    finally:
+        _cleanup(root)
+
+
+def test_34_still_unapproved_after_combined_repair():
+    root = mkroot(specs=malformed_generated_from_specs(include_validation_summary=False))
+    try:
+        cli.cmd_begin(root, "reason")
+        cli.cmd_finalize(root)
+        check("34/no_approval_file", not os.path.exists(
+            os.path.join(root, ".pmo", "approvals", "specs-approval.yaml")))
+        after = open(os.path.join(root, "docs", "pmo", "specs", "specs.md")).read()
+        check("34/exec_authorized_still_false", "**Execution Authorized:** false" in after)
+    finally:
+        _cleanup(root)
+
+
+def test_35_cr_not_required_for_metadata_repair():
+    root = mkroot(specs=malformed_generated_from_specs())
+    try:
+        cli.cmd_begin(root, "reason")
+        cli.cmd_finalize(root)
+        check("35/no_cr_marker_created", not os.path.exists(
+            os.path.join(root, ".pmo", "change-request-transaction.json")))
+        check("35/no_cr_files", not os.path.isdir(os.path.join(root, "docs", "pmo", "cr"))
+              or not os.listdir(os.path.join(root, "docs", "pmo", "cr")))
+    finally:
+        _cleanup(root)
+
+
+# --------------------------------------------------------------------------- #
+# DOCUMENT_CONTROL_METADATA_REPAIR - negative tests (metadata_fix_is_field_only)
+# --------------------------------------------------------------------------- #
+
+def test_36_project_change_rejected():
+    before = malformed_generated_from_specs()
+    after = before.replace("- **Project:** Smart Basket\n", "- **Project:** Renamed Co\n")
+    ok, reason = core.metadata_fix_is_field_only(before, after, core.PERMITTED_METADATA_FIELDS)
+    check("36/project_change_rejected", not ok, reason)
+
+
+def test_37_project_id_change_rejected():
+    before = malformed_generated_from_specs()
+    after = before.replace("- **Project ID:** SMART-BASKET\n", "- **Project ID:** OTHER-ID\n")
+    ok, reason = core.metadata_fix_is_field_only(before, after, core.PERMITTED_METADATA_FIELDS)
+    check("37/project_id_change_rejected", not ok, reason)
+
+
+def test_38_pm_identity_change_rejected():
+    before = malformed_generated_from_specs().replace(
+        "- **Repository:**", "- **PM:** Jane PM\n- **Repository:**")
+    after = before.replace("- **PM:** Jane PM\n", "- **PM:** Someone Else\n")
+    ok, reason = core.metadata_fix_is_field_only(before, after, core.PERMITTED_METADATA_FIELDS)
+    check("38/pm_identity_change_rejected", not ok, reason)
+
+
+def test_39_specs_version_change_rejected_by_metadata_check():
+    before = malformed_generated_from_specs(spec_version="0.1")
+    after = before.replace("- **Spec Version:** 0.1", "- **Spec Version:** 0.2")
+    ok, reason = core.metadata_fix_is_field_only(before, after, core.PERMITTED_METADATA_FIELDS)
+    check("39/spec_version_change_rejected", not ok, reason)
+
+
+def test_40_specs_status_change_rejected():
+    before = malformed_generated_from_specs()
+    after = before.replace("- **Spec Status:** PROVISIONAL", "- **Spec Status:** ACTIVE")
+    ok, reason = core.metadata_fix_is_field_only(before, after, core.PERMITTED_METADATA_FIELDS)
+    check("40/spec_status_change_rejected", not ok, reason)
+
+
+def test_41_execution_authorized_change_rejected_by_metadata_check():
+    before = malformed_generated_from_specs()
+    after = before.replace("- **Execution Authorized:** false", "- **Execution Authorized:** true")
+    ok, reason = core.metadata_fix_is_field_only(before, after, core.PERMITTED_METADATA_FIELDS)
+    check("41/execution_authorized_change_rejected", not ok, reason)
+
+
+def test_42_requirement_content_change_rejected_by_metadata_check():
+    before = malformed_generated_from_specs()
+    after = before.replace(
+        "The system validates the cart and records the order.",
+        "The system validates the cart and records the order instantly.")
+    ok, reason = core.metadata_fix_is_field_only(before, after, core.PERMITTED_METADATA_FIELDS)
+    check("42/requirement_content_change_rejected", not ok, reason)
+
+
+def test_43_requirement_id_change_rejected_by_metadata_check():
+    before = malformed_generated_from_specs()
+    after = before.replace("### FR-001", "### FR-002")
+    ok, reason = core.metadata_fix_is_field_only(before, after, core.PERMITTED_METADATA_FIELDS)
+    check("43/requirement_id_change_rejected", not ok, reason)
+
+
+def test_44_business_rule_change_rejected_by_metadata_check():
+    before = malformed_generated_from_specs().replace(
+        "## Non-Functional Requirements\n",
+        "## Non-Functional Requirements\n\n## Business Rules\n\n"
+        "| ID | Rule |\n|---|---|\n| BR-001 | Original |\n")
+    after = before.replace("| BR-001 | Original |", "| BR-001 | Changed |")
+    ok, reason = core.metadata_fix_is_field_only(before, after, core.PERMITTED_METADATA_FIELDS)
+    check("44/business_rule_change_rejected", not ok, reason)
+
+
+def test_45_nfr_change_rejected_by_metadata_check():
+    before = malformed_generated_from_specs().replace(
+        "## Non-Functional Requirements\n",
+        "## Non-Functional Requirements\n\n### NFR-001 - Latency\n\n"
+        "- **Requirement:** p95 under 500ms\n")
+    after = before.replace("p95 under 500ms", "p95 under 100ms")
+    ok, reason = core.metadata_fix_is_field_only(before, after, core.PERMITTED_METADATA_FIELDS)
+    check("45/nfr_change_rejected", not ok, reason)
+
+
+def test_46_qa_decision_change_rejected_by_metadata_check():
+    before = malformed_generated_from_specs().replace(
+        "| N/A | N/A | N/A | N/A |", "| N/A | N/A | N/A | QST-005 |")
+    after = before.replace("| N/A | N/A | N/A | QST-005 |", "| N/A | N/A | N/A | QST-009 |")
+    ok, reason = core.metadata_fix_is_field_only(before, after, core.PERMITTED_METADATA_FIELDS)
+    check("46/qa_decision_change_rejected", not ok, reason)
+
+
+def test_47_intent_mapping_change_rejected_by_metadata_check():
+    before = malformed_generated_from_specs()
+    after = before.replace(
+        "| INT-REQ-001 | FR-001 | COVERED |  |",
+        "| INT-REQ-001 | FR-001 | PARTIALLY_COVERED | now blocked |")
+    ok, reason = core.metadata_fix_is_field_only(before, after, core.PERMITTED_METADATA_FIELDS)
+    check("47/intent_mapping_change_rejected", not ok, reason)
+
+
+def test_48_source_semantics_change_rejected_by_metadata_check():
+    before = malformed_generated_from_specs()
+    after = before.replace(
+        "- **Source Requirement:** INT-REQ-001\n",
+        "- **Source Requirement:** INT-REQ-002\n")
+    ok, reason = core.metadata_fix_is_field_only(before, after, core.PERMITTED_METADATA_FIELDS)
+    check("48/source_semantics_change_rejected", not ok, reason)
+
+
+def test_49_arbitrary_valid_metadata_field_change_rejected():
+    """A field OTHER than the whitelisted one, even a harmless-looking
+    metadata change (e.g. Repository), must be rejected - the whitelist is
+    exactly one field, never 'any Document Control field'."""
+    before = malformed_generated_from_specs()
+    after = before.replace(
+        "- **Repository:** bitbucket:devops-tekrevol/lets-explore-more-specs",
+        "- **Repository:** bitbucket:devops-tekrevol/renamed-repo")
+    ok, reason = core.metadata_fix_is_field_only(before, after, core.PERMITTED_METADATA_FIELDS)
+    check("49/arbitrary_valid_field_change_rejected", not ok, reason)
+
+
+def test_50_repair_requires_evidence_field_is_invalid():
+    """A field that is already valid must never be 'repaired' - the
+    governed begin path refuses even to propose a fix for it."""
+    root = mkroot(specs=build_specs())  # already-canonical Generated From
+    try:
+        text = open(os.path.join(root, "docs", "pmo", "specs", "specs.md")).read()
+        invalid, _cur = core._generated_from_invalid(root, text)
+        check("50/valid_field_not_flagged_invalid", invalid is False, invalid)
     finally:
         _cleanup(root)
 
@@ -587,6 +829,27 @@ def main():
         test_27_dry_run_writes_nothing,
         test_28_already_valid_specs_has_nothing_to_repair,
         test_29_unsupported_failure_class_rejected,
+        test_30_malformed_generated_from_corrected_to_canonical,
+        test_31_generated_from_fix_changes_nothing_substantive,
+        test_32_both_repair_classes_applied_sequentially,
+        test_33_full_validation_passes_after_combined_repair,
+        test_34_still_unapproved_after_combined_repair,
+        test_35_cr_not_required_for_metadata_repair,
+        test_36_project_change_rejected,
+        test_37_project_id_change_rejected,
+        test_38_pm_identity_change_rejected,
+        test_39_specs_version_change_rejected_by_metadata_check,
+        test_40_specs_status_change_rejected,
+        test_41_execution_authorized_change_rejected_by_metadata_check,
+        test_42_requirement_content_change_rejected_by_metadata_check,
+        test_43_requirement_id_change_rejected_by_metadata_check,
+        test_44_business_rule_change_rejected_by_metadata_check,
+        test_45_nfr_change_rejected_by_metadata_check,
+        test_46_qa_decision_change_rejected_by_metadata_check,
+        test_47_intent_mapping_change_rejected_by_metadata_check,
+        test_48_source_semantics_change_rejected_by_metadata_check,
+        test_49_arbitrary_valid_metadata_field_change_rejected,
+        test_50_repair_requires_evidence_field_is_invalid,
     ):
         fn()
     total = len(_RESULTS)

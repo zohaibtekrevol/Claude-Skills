@@ -25,22 +25,46 @@ is that missing, deliberately narrow, third path.
 
 Architectural boundary this module enforces
 -----------------------------------------------
-STRUCTURAL_REPAIR is not a general pre-approval Specs editor. It may
-**only**:
+STRUCTURAL_REPAIR is not a general pre-approval Specs editor. The single
+`operation: "STRUCTURAL_REPAIR"` supports exactly two, deliberately
+distinct **repair classes**, and never anything else:
 
-* add a **missing mandatory required section** (per
-  `specs-governance-guard.py`'s own `REQUIRED_SECTIONS`) whose content can
-  be **deterministically derived** from the Specs artifact's own current,
-  already-governed state - today, exactly one such section is supported:
-  `## Validation Summary` (see `PERMITTED_REPAIR_SECTIONS`);
-* append that content strictly as new trailing material - **every byte of
-  the existing document must remain, unchanged, as an exact prefix of the
-  repaired document** (`content_preserves_existing`, enforced
-  independently of the derivation logic, so a bug in derivation can never
-  silently mutate existing content);
-* never introduce a new `FR-*` / `NFR-*` / `BR-*` identifier, never change
-  `Spec Version`, `Spec Status`, `Execution Authorized`, or any Document
-  Control field, never touch Scope / Change Log / CR / Feedback sources.
+* `MISSING_REQUIRED_SECTION` - add a **missing mandatory required
+  section** (per `specs-governance-guard.py`'s own `REQUIRED_SECTIONS`)
+  whose content can be **deterministically derived** from the Specs
+  artifact's own current, already-governed state - today, exactly one such
+  section is supported: `## Validation Summary` (see
+  `PERMITTED_REPAIR_SECTIONS`). Applied by appending that content strictly
+  as new trailing material - **every byte of the existing document must
+  remain, unchanged, as an exact prefix of the repaired document**
+  (`content_preserves_existing`).
+* `DOCUMENT_CONTROL_METADATA_REPAIR` - correct a **single, explicitly
+  whitelisted Document Control field** (today: only `Generated From`,
+  see `PERMITTED_METADATA_FIELDS`) whose *current* value is independently
+  proven structurally invalid by the guard's own
+  `validate_source_versions` check, replacing it with a value
+  **deterministically derivable** from already-governed state (today: the
+  canonical Q&A register path, `qa_register_core.QA_FILE_POSIX` - the
+  exact representation `spec-generation/SKILL.md` Section 7 already
+  documents for the NEW no-Scope path, never a new invented shape).
+  Applied by changing **only** that one field's line - every other line,
+  including every other Document Control field, must remain byte-identical
+  (`metadata_fix_is_field_only`, enforced independently of the derivation
+  logic).
+
+Both classes may apply in the same transaction (the metadata fix is
+applied first, then the missing-section append), so a single `finalize`
+call repairs every currently-addressable defect at once - but each class's
+own safety check runs independently, so a bug in one can never mask a
+violation the other would have caught.
+
+In every case, and regardless of which repair class(es) apply:
+
+* never introduce a new `FR-*` / `NFR-*` / `BR-*` identifier;
+* never change `Spec Version`, `Spec Status`, `Execution Authorized`,
+  `Project`, `Project ID`, `Client`, `Repository`, or any Document Control
+  field other than the one explicitly whitelisted metadata field;
+* never touch Scope / Change Log / CR / Feedback sources.
 
 Once a baseline is approved (`Execution Authorized: true` and a valid
 matching `specs-approval.yaml` exists), **none** of this module's
@@ -120,14 +144,27 @@ STRUCTURAL_REPAIR_MARKER_REQUIRED_FIELDS = (
     "transaction_type", "transaction_id", "project_id", "artifact",
     "spec_version", "operation", "reason", "started_at", "status",
     "pre_repair_validation_code", "pre_repair_validation_message",
-    "permitted_repair_class", "specs_hash_before",
+    "repair_classes", "missing_sections", "metadata_fixes",
+    "specs_hash_before",
 )
 
+# The two, and only two, repair classes STRUCTURAL_REPAIR ever performs.
+# Extending this set is a framework decision (new derivation logic + new
+# tests), never a runtime parameter.
+REPAIR_CLASS_MISSING_SECTION = "MISSING_REQUIRED_SECTION"
+REPAIR_CLASS_METADATA = "DOCUMENT_CONTROL_METADATA_REPAIR"
+
 # The complete, deliberately small whitelist of required sections this
-# mechanism may add. Extending this set is a framework decision (new
-# derivation logic + new tests), never a runtime parameter - a caller can
-# never request an arbitrary section be "repaired".
+# mechanism may add. A caller can never request an arbitrary section be
+# "repaired".
 PERMITTED_REPAIR_SECTIONS = ("Validation Summary",)
+
+# The complete, deliberately small whitelist of Document Control fields
+# DOCUMENT_CONTROL_METADATA_REPAIR may ever change. A caller can never
+# request an arbitrary field be "repaired", and a field not currently
+# proven invalid by the guard's own validator is never touched (see
+# `_generated_from_invalid`).
+PERMITTED_METADATA_FIELDS = ("Generated From",)
 
 
 def marker_abspath(root):
@@ -282,6 +319,81 @@ def content_preserves_existing(before, after):
 
 
 # --------------------------------------------------------------------------- #
+# DOCUMENT_CONTROL_METADATA_REPAIR - Generated From (see module docstring)
+# --------------------------------------------------------------------------- #
+
+def _generated_from_invalid(root, spec_text):
+    """(is_invalid, current_value). Reuses
+    specs_guard.parse_spec_metadata + specs_guard.validate_source_versions
+    directly - never a second implementation of this check, and never
+    proposes a fix for a field the guard does not itself currently flag."""
+    meta = specs_guard.parse_spec_metadata(spec_text)
+    d = specs_guard.validate_source_versions(meta, root)
+    invalid = d is not None and "Generated From" in d.message
+    return invalid, meta.get("generated from")
+
+
+def derive_generated_from_value(root):
+    """The canonical NEW (no-Scope) path representation
+    `spec-generation/SKILL.md` Section 7 already documents: a single path
+    naming the canonical Q&A register, reused verbatim from
+    `qa_register_core.QA_FILE_POSIX` - never a second, invented
+    representation. Returns None (cannot derive) if that register does not
+    actually exist on disk - this mechanism never fabricates a path that
+    would itself fail the same existence check it is trying to fix."""
+    candidate = qac.QA_FILE_POSIX
+    if not os.path.exists(os.path.join(root, *candidate.split("/"))):
+        return None
+    return candidate
+
+
+def apply_metadata_fix(content, field, new_value):
+    """Return (new_content, ok) - the exact same single-line-only
+    replacement `intent_approval_core.set_doc_control_field` already
+    provides for Intent, reused verbatim here."""
+    new_content, ok = iac.set_doc_control_field(content, field, new_value)
+    return (new_content if ok else None), ok
+
+
+def metadata_fix_is_field_only(before, after, permitted_fields):
+    """The independent safety net for DOCUMENT_CONTROL_METADATA_REPAIR,
+    exactly analogous in role to `content_preserves_existing` for
+    MISSING_REQUIRED_SECTION: regardless of how `after` was produced,
+    every line that differs from `before` must be identifiable as one of
+    `permitted_fields`'s own Document Control field line (reusing
+    `intent_approval_core._doc_control_field_line_regex` - never a second
+    field-detection implementation) - a changed FR/NFR/BR line, a changed
+    Project/Project ID/Spec Version/Spec Status/Execution Authorized line,
+    or any other changed line that isn't one of `permitted_fields`, is
+    rejected outright. Returns (ok: bool, reason-or-changed-fields)."""
+    b_lines = before.splitlines()
+    a_lines = after.splitlines()
+    if len(a_lines) != len(b_lines):
+        return False, ("the line count changed during a metadata-only fix "
+                       "- a metadata repair may only ever replace an "
+                       "existing line in place, never add or remove a "
+                       "line.")
+    changed_fields = set()
+    for bl, al in zip(b_lines, a_lines):
+        if bl == al:
+            continue
+        matched = None
+        for field in permitted_fields:
+            pattern = iac._doc_control_field_line_regex(field)
+            if pattern.match(bl) and pattern.match(al):
+                matched = field
+                break
+        if matched is None:
+            return False, (
+                "a line changed that is not one of the permitted metadata "
+                "fields ({}) - refusing: before={!r} after={!r}".format(
+                    ", ".join(permitted_fields), bl, al)
+            )
+        changed_fields.add(matched)
+    return True, changed_fields
+
+
+# --------------------------------------------------------------------------- #
 # BEGIN preconditions (read-only)
 # --------------------------------------------------------------------------- #
 
@@ -340,14 +452,6 @@ def run_begin_preconditions(root, reason):
 
     missing = missing_required_sections(content)
     missing_names = [name for name, _rx, _cond in missing]
-    if not missing_names:
-        return None, deny(
-            "PMO-SPEC-REPAIR-006",
-            "the current full_spec_validation failure ({}: {}) is not a "
-            "missing-required-section defect this mechanism can address - "
-            "it requires engineering/content review, not a structural "
-            "repair.".format(d.code, d.message),
-        )
     unsupported = [n for n in missing_names if n not in PERMITTED_REPAIR_SECTIONS]
     if unsupported:
         return None, deny(
@@ -356,6 +460,38 @@ def run_begin_preconditions(root, reason):
             "mechanism does not (yet) know how to derive deterministically "
             "- only {} is supported today.".format(
                 unsupported, list(PERMITTED_REPAIR_SECTIONS)),
+        )
+    supported_missing = [n for n in missing_names if n in PERMITTED_REPAIR_SECTIONS]
+
+    gf_invalid, gf_current = _generated_from_invalid(root, content)
+    metadata_fixes = {}
+    if gf_invalid:
+        new_gf = derive_generated_from_value(root)
+        if new_gf is None:
+            return None, deny(
+                "PMO-SPEC-REPAIR-017",
+                "Document Control 'Generated From' ('{}') is structurally "
+                "invalid, but its canonical value cannot be derived - the "
+                "canonical Q&A register does not exist on "
+                "disk.".format(gf_current),
+            )
+        metadata_fixes["Generated From"] = new_gf
+
+    repair_classes = []
+    if supported_missing:
+        repair_classes.append(REPAIR_CLASS_MISSING_SECTION)
+    if metadata_fixes:
+        repair_classes.append(REPAIR_CLASS_METADATA)
+
+    if not repair_classes:
+        return None, deny(
+            "PMO-SPEC-REPAIR-006",
+            "the current full_spec_validation failure ({}: {}) is not "
+            "addressable by any supported STRUCTURAL_REPAIR class "
+            "({} / {}) - it requires engineering/content review, not a "
+            "structural repair.".format(
+                d.code, d.message, REPAIR_CLASS_MISSING_SECTION,
+                REPAIR_CLASS_METADATA),
         )
 
     cfg = load_project_config(root) or {}
@@ -393,7 +529,9 @@ def run_begin_preconditions(root, reason):
         "reason": reason,
         "pre_repair_validation_code": d.code,
         "pre_repair_validation_message": d.message,
-        "permitted_repair_class": missing_names,
+        "repair_classes": repair_classes,
+        "missing_sections": supported_missing,
+        "metadata_fixes": metadata_fixes,
         "specs_hash_before": sha256_of_text(content),
     }
     return plan, None
@@ -412,7 +550,9 @@ def build_marker_data(plan, transaction_id, started_at):
         "status": "ACTIVE",
         "pre_repair_validation_code": plan["pre_repair_validation_code"],
         "pre_repair_validation_message": plan["pre_repair_validation_message"],
-        "permitted_repair_class": plan["permitted_repair_class"],
+        "repair_classes": plan["repair_classes"],
+        "missing_sections": plan["missing_sections"],
+        "metadata_fixes": plan["metadata_fixes"],
         "specs_hash_before": plan["specs_hash_before"],
     }
 
@@ -483,20 +623,66 @@ def finalize_transaction(root, marker_data):
                 "refusing to repair a moving target. Re-run `begin`.",
             )
 
-        missing_names = plan["permitted_repair_class"]
-        tail_parts = []
-        for name in PERMITTED_REPAIR_SECTIONS:
-            if name in missing_names:
-                tail_parts.append(_DERIVERS[name](root, before))
-        if not tail_parts:
+        repair_classes = plan["repair_classes"]
+        missing_names = plan["missing_sections"]
+        metadata_fixes = plan["metadata_fixes"]
+        if not repair_classes:
             return None, deny("PMO-SPEC-REPAIR-006",
-                              "no derivable missing section remained at finalize time.")
+                              "no applicable repair class remained at finalize time.")
 
-        after = before.rstrip("\n") + "\n\n---\n\n" + "\n---\n\n".join(tail_parts)
+        # 1) DOCUMENT_CONTROL_METADATA_REPAIR first - a single, independently
+        #    field-scoped in-place line replacement. Applied before the
+        #    missing-section append so the append step's own prefix check
+        #    always compares against the metadata-corrected intermediate,
+        #    never silently reintroducing the stale value.
+        intermediate = before
+        if REPAIR_CLASS_METADATA in repair_classes:
+            if not metadata_fixes:
+                return None, deny("PMO-SPEC-REPAIR-017",
+                                  "no derivable metadata fix remained at finalize time.")
+            for field, new_value in metadata_fixes.items():
+                if field not in PERMITTED_METADATA_FIELDS:
+                    return None, deny(
+                        "PMO-SPEC-REPAIR-018",
+                        "'{}' is not a permitted STRUCTURAL_REPAIR metadata "
+                        "field ({}).".format(field, ", ".join(PERMITTED_METADATA_FIELDS)),
+                    )
+                still_invalid, _cur = _generated_from_invalid(root, intermediate) \
+                    if field == "Generated From" else (True, None)
+                if not still_invalid:
+                    return None, deny(
+                        "PMO-SPEC-REPAIR-019",
+                        "'{}' is already valid - refusing to overwrite a "
+                        "field that is not proven structurally "
+                        "invalid.".format(field),
+                    )
+                intermediate, ok = apply_metadata_fix(intermediate, field, new_value)
+                if not ok:
+                    return None, deny(
+                        "PMO-SPEC-REPAIR-018",
+                        "could not locate the '{}' Document Control field "
+                        "line deterministically - refusing a partial "
+                        "edit.".format(field),
+                    )
+            ok, info = metadata_fix_is_field_only(before, intermediate, PERMITTED_METADATA_FIELDS)
+            if not ok:
+                return None, deny("PMO-SPEC-REPAIR-011", info)
 
-        ok, reason = content_preserves_existing(before, after)
-        if not ok:
-            return None, deny("PMO-SPEC-REPAIR-011", reason)
+        # 2) MISSING_REQUIRED_SECTION - purely-appended trailing content,
+        #    checked against the (possibly metadata-corrected) intermediate.
+        after = intermediate
+        if REPAIR_CLASS_MISSING_SECTION in repair_classes:
+            tail_parts = []
+            for name in PERMITTED_REPAIR_SECTIONS:
+                if name in missing_names:
+                    tail_parts.append(_DERIVERS[name](root, intermediate))
+            if not tail_parts:
+                return None, deny("PMO-SPEC-REPAIR-006",
+                                  "no derivable missing section remained at finalize time.")
+            after = intermediate.rstrip("\n") + "\n\n---\n\n" + "\n---\n\n".join(tail_parts)
+            ok, reason = content_preserves_existing(intermediate, after)
+            if not ok:
+                return None, deny("PMO-SPEC-REPAIR-011", reason)
 
         d2 = specs_guard.full_spec_validation(root, spec_text=after)
         if d2 is not None:
@@ -528,7 +714,9 @@ def finalize_transaction(root, marker_data):
 
         return {
             "spec_version": plan["spec_version"],
+            "repair_classes": repair_classes,
             "repaired_sections": missing_names,
+            "repaired_metadata_fields": sorted(metadata_fixes.keys()),
             "reason": plan["reason"],
         }, None
     except Exception as exc:  # pragma: no cover - fail closed
