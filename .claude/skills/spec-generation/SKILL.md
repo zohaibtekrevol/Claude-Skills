@@ -439,6 +439,15 @@ Acceptance Criteria:      <objective, testable conditions — Section 13>
 Status:                   ACTIVE | DEFERRED | RETIRED
 ```
 
+- **One field per line.** Every field above is its own `- **Label:** value` line
+  (or `Label: value`). Never combine fields on one line (for example
+  `**Module:** X | **Actor(s):** Y` or `**Introduced In:** 0.1 | **Last
+  Modified In:** 0.1 | **Change Source:** Z`), and write standalone `ID` and
+  `Title` fields in addition to the heading - the heading alone is not
+  enough for the Specs parser. An artifact already generated in that old
+  layout is repaired only through the governed, pre-approval
+  `PRE_BASELINE_SCHEMA_MIGRATION` transaction (`specs-schema-migration.py`),
+  never by hand-editing and never by a CR.
 - `DEFERRED` and `RETIRED` FRs keep the ID and the historical fields; they may
   omit behavioural detail that no longer applies but must keep `Source Scope`,
   `Introduced In`, `Last Modified In`, `Change Source` and a reason.

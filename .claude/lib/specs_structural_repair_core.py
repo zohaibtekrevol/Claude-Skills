@@ -510,6 +510,92 @@ def provenance_fix_is_token_only(before, after):
 
 
 # --------------------------------------------------------------------------- #
+# Shared pre-baseline gates (also used by specs_schema_migration_core.py, so
+# the "still an unapproved provisional artifact" rules exist exactly once)
+# --------------------------------------------------------------------------- #
+
+SCHEMA_MIGRATION_MARKER_RELPATH_PARTS = (
+    ".pmo", "specs-schema-migration-transaction.json")
+
+
+def pre_baseline_approval_gate(root, meta):
+    """Decision or None: Spec Status PROVISIONAL, Execution Authorized false,
+    and no valid matching Specs approval."""
+    status = (meta.get("spec_status") or "").strip().upper()
+    if status != "PROVISIONAL":
+        return deny(
+            "PMO-SPEC-REPAIR-003",
+            "Spec Status is '{}', not PROVISIONAL - STRUCTURAL_REPAIR only "
+            "applies to a pre-baseline artifact.".format(meta.get("spec_status")),
+        )
+    exec_auth = (meta.get("execution_authorized") or "").strip().lower()
+    if exec_auth != "false":
+        return deny(
+            "PMO-SPEC-REPAIR-003",
+            "Execution Authorized is '{}', not false - an authorized "
+            "baseline is protected; STRUCTURAL_REPAIR never applies to "
+            "it.".format(meta.get("execution_authorized")),
+        )
+
+    approval_data, approval_err = sac.load_specs_approval(root)
+    if approval_data is not None and approval_err is None:
+        match_err = sac.validate_specs_approval_matches(
+            root, spec_version=meta.get("spec_version"))
+        if match_err is None:
+            return deny(
+                "PMO-SPEC-REPAIR-004",
+                "a valid, matching Specs approval record already exists "
+                "for Spec Version {} - this baseline is approved and "
+                "protected; STRUCTURAL_REPAIR never applies to "
+                "it.".format(meta.get("spec_version")),
+            )
+
+    return None
+
+
+def pre_baseline_concurrency_gate(root, meta, ignore_schema_migration_marker=False):
+    """(project_id, Decision-or-None): project identity matches and no other
+    governed transaction (CR, feedback, schema migration) is open."""
+    cfg = load_project_config(root) or {}
+    project_id = _clean((cfg.get("project") or {}).get("id"))
+    if not project_id:
+        return None, deny("PMO-SPEC-REPAIR-008",
+                          ".pmo/project-config.yaml has no project.id.")
+    doc_pid = _clean(meta.get("project_id"))
+    if doc_pid and doc_pid.upper() != project_id.upper():
+        return None, deny(
+            "PMO-SPEC-REPAIR-008",
+            "Specs Document Control Project ID ('{}') does not match "
+            "project-config.yaml ('{}').".format(doc_pid, project_id),
+        )
+
+    cr_state, _cr_data, _cr_err = crc.cr_marker_status(root)
+    if cr_state == "OPEN":
+        return None, deny(
+            "PMO-SPEC-REPAIR-009",
+            "an OPEN change-request transaction is active for this "
+            "project - a CR-incorporation operation must not be able to "
+            "masquerade as, or run concurrently with, a STRUCTURAL_REPAIR.",
+        )
+    if crc.feedback_marker_is_open(root):
+        return None, deny(
+            "PMO-SPEC-REPAIR-009",
+            "an OPEN feedback-management transaction is active for this "
+            "project - STRUCTURAL_REPAIR must not proceed concurrently "
+            "with it.",
+        )
+
+    if (not ignore_schema_migration_marker and os.path.exists(
+            os.path.join(root, *SCHEMA_MIGRATION_MARKER_RELPATH_PARTS))):
+        return None, deny(
+            "PMO-SPEC-REPAIR-009",
+            "a PRE_BASELINE_SCHEMA_MIGRATION transaction marker exists - "
+            "resolve (finalize/abort) it before another Specs "
+            "transaction.")
+    return project_id, None
+
+
+# --------------------------------------------------------------------------- #
 # BEGIN preconditions (read-only)
 # --------------------------------------------------------------------------- #
 
@@ -529,34 +615,9 @@ def run_begin_preconditions(root, reason):
                           "CREATION territory instead).".format(SPECS_POSIX))
 
     meta = sac.parse_spec_doc_control(content)
-    status = (meta.get("spec_status") or "").strip().upper()
-    if status != "PROVISIONAL":
-        return None, deny(
-            "PMO-SPEC-REPAIR-003",
-            "Spec Status is '{}', not PROVISIONAL - STRUCTURAL_REPAIR only "
-            "applies to a pre-baseline artifact.".format(meta.get("spec_status")),
-        )
-    exec_auth = (meta.get("execution_authorized") or "").strip().lower()
-    if exec_auth != "false":
-        return None, deny(
-            "PMO-SPEC-REPAIR-003",
-            "Execution Authorized is '{}', not false - an authorized "
-            "baseline is protected; STRUCTURAL_REPAIR never applies to "
-            "it.".format(meta.get("execution_authorized")),
-        )
-
-    approval_data, approval_err = sac.load_specs_approval(root)
-    if approval_data is not None and approval_err is None:
-        match_err = sac.validate_specs_approval_matches(
-            root, spec_version=meta.get("spec_version"))
-        if match_err is None:
-            return None, deny(
-                "PMO-SPEC-REPAIR-004",
-                "a valid, matching Specs approval record already exists "
-                "for Spec Version {} - this baseline is approved and "
-                "protected; STRUCTURAL_REPAIR never applies to "
-                "it.".format(meta.get("spec_version")),
-            )
+    gate = pre_baseline_approval_gate(root, meta)
+    if gate is not None:
+        return None, gate
 
     d = specs_guard.full_spec_validation(root, spec_text=content)
     if d is None:
@@ -626,34 +687,9 @@ def run_begin_preconditions(root, reason):
                 REPAIR_CLASS_METADATA, REPAIR_CLASS_PROVENANCE),
         )
 
-    cfg = load_project_config(root) or {}
-    project_id = _clean((cfg.get("project") or {}).get("id"))
-    if not project_id:
-        return None, deny("PMO-SPEC-REPAIR-008",
-                          ".pmo/project-config.yaml has no project.id.")
-    doc_pid = _clean(meta.get("project_id"))
-    if doc_pid and doc_pid.upper() != project_id.upper():
-        return None, deny(
-            "PMO-SPEC-REPAIR-008",
-            "Specs Document Control Project ID ('{}') does not match "
-            "project-config.yaml ('{}').".format(doc_pid, project_id),
-        )
-
-    cr_state, _cr_data, _cr_err = crc.cr_marker_status(root)
-    if cr_state == "OPEN":
-        return None, deny(
-            "PMO-SPEC-REPAIR-009",
-            "an OPEN change-request transaction is active for this "
-            "project - a CR-incorporation operation must not be able to "
-            "masquerade as, or run concurrently with, a STRUCTURAL_REPAIR.",
-        )
-    if crc.feedback_marker_is_open(root):
-        return None, deny(
-            "PMO-SPEC-REPAIR-009",
-            "an OPEN feedback-management transaction is active for this "
-            "project - STRUCTURAL_REPAIR must not proceed concurrently "
-            "with it.",
-        )
+    project_id, gate = pre_baseline_concurrency_gate(root, meta)
+    if gate is not None:
+        return None, gate
 
     plan = {
         "project_id": project_id,
@@ -874,7 +910,7 @@ def finalize_transaction(root, marker_data):
                           "internal error during finalize: {}".format(exc))
 
 
-def abort_transaction(root, marker_data, abort_reason):
+def abort_transaction(root, marker_data, abort_reason, marker_path=None):
     """Governed recovery for a STRUCTURAL_REPAIR transaction that did NOT
     finalize (e.g. `finalize` failed closed with RECOVERY_REQUIRED).
 
@@ -914,7 +950,7 @@ def abort_transaction(root, marker_data, abort_reason):
                 "PMO-SPEC-REPAIR-022",
                 "Spec Version no longer matches the marker - refusing to abort.")
         try:
-            os.remove(marker_abspath(root))
+            os.remove(marker_path or marker_abspath(root))
         except OSError as exc:
             return None, deny("PMO-SPEC-REPAIR-023",
                               "could not remove the marker: {}".format(exc))
