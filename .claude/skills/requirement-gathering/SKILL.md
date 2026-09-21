@@ -412,6 +412,19 @@ Intent VALIDATED (+ matching PM approval)
   proceeds - its `Specs Impact` field is exactly how the deferred decision
   stays traceable inside `specs.md` (an explicit TBD / open item, never a
   silently dropped question).
+- **Q&A only for material decisions - never to fill a schema slot.** A Q&A
+  record is created only for an unresolved decision that materially affects
+  product behaviour, workflow, scope, acceptance, integrations, security,
+  permissions, data handling or delivery. Specification Generation records
+  each Functional Requirement's conditional detail fields with an explicit
+  applicability state (`spec-generation` Section 12.1): `DEFINED`,
+  `NOT_APPLICABLE: <reason>` and `NOT_SPECIFIED` create **no** Q&A record and
+  no PM question; only `PENDING_DECISION: QST-###` does, and it must cite a
+  canonical record here. Such a record appears in the PM Decision Inbox through
+  the normal non-terminal-status rule (`OPEN` / `DEFERRED` / `NON_BLOCKING`).
+  Never re-open or duplicate an already-resolved record: once a cited record
+  is `CONFIRMED` / `REJECTED` / `RESOLVED`, the Specs field becomes `DEFINED`
+  with the resolved value.
 - **A post-baseline Q&A resolution that materially changes already-approved
   Specs functionality must not bypass Change Request governance.** Resolving
   a Q&A record after `specs.md` has reached an approved baseline is not, by

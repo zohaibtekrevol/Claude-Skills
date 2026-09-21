@@ -154,13 +154,13 @@ GOOD_SPEC = '''# Specification: Smart Basket
 - **Preconditions:** The app is installed and open.
 - **Trigger:** The customer selects a language from settings.
 - **Primary Behavior:** The system re-renders customer-facing screens in the selected language.
-- **Business Rules:** N/A
+- **Business Rules:** NOT_APPLICABLE: no business rule applies to this requirement
 - **Validation Rules:** The selected language must be one of the supported set (English, Arabic).
 - **Alternate / Exception Behavior:** If a translation string is missing the English string is shown as a fallback.
 - **Permissions:** Any customer may change their own language preference.
 - **Inputs:** Selected language code.
 - **Outputs:** Updated UI language and a persisted preference.
-- **Dependencies:** N/A
+- **Dependencies:** NOT_APPLICABLE: no dependency applies to this requirement
 - **Acceptance Criteria:** Given the app is open When the customer selects Arabic Then all customer-facing UI text is presented in Arabic.
 - **Status:** ACTIVE
 
@@ -886,13 +886,13 @@ NEW_PATH_SPEC = '''# Specification: Smart Basket
 - **Preconditions:** The customer is authenticated.
 - **Trigger:** The customer confirms checkout.
 - **Primary Behavior:** The system validates the cart and records the order.
-- **Business Rules:** N/A
+- **Business Rules:** NOT_APPLICABLE: no business rule applies to this requirement
 - **Validation Rules:** The cart must be non-empty.
 - **Alternate / Exception Behavior:** If payment fails the order is not created.
 - **Permissions:** A B2C customer may place their own order.
 - **Inputs:** Cart contents.
 - **Outputs:** A persisted order.
-- **Dependencies:** N/A
+- **Dependencies:** NOT_APPLICABLE: no dependency applies to this requirement
 - **Acceptance Criteria:** Given a valid cart When checkout is confirmed Then an order is created.
 - **Status:** ACTIVE
 

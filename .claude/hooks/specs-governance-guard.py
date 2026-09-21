@@ -175,13 +175,41 @@ TRACE_HEADING_RE = r"(?:scope|intent|requirements?)\s*(?:→|-+>|to)\s*specs?\s+
 HISTORY_HEADING_RE = r"specification\s+change\s+history"
 OPEN_HEADING_RE = r"open\s+questions"
 
-FR_ACTIVE_LABELS = (
+# --------------------------------------------------------------------------- #
+# Functional Requirement field POLICY (PMO-SPEC-010)
+#
+# CORE_REQUIRED        every active FR carries a substantive value.
+# GOVERNANCE_DERIVED   stamped from lifecycle/governance state (presence here;
+#                      value provenance is validated by PMO-SPEC-014).
+# CONDITIONALLY_REQUIRED  exactly one explicit applicability state:
+#                      DEFINED (a substantive value) | NOT_APPLICABLE: <reason>
+#                      | NOT_SPECIFIED | PENDING_DECISION: <QST-###/ASM-###>.
+# OPTIONAL             absence is valid; preserved when present.
+#
+# Rationale: the framework must never force fabricated detail merely to
+# satisfy a schema slot; only material unresolved decisions become Q&A.
+# --------------------------------------------------------------------------- #
+FR_CORE_LABELS = (
     "ID", "Title", "Module", "Actor(s)", "Requirement", "Source Scope",
-    "Introduced In", "Last Modified In", "Change Source", "Preconditions",
-    "Trigger", "Primary Behavior", "Business Rules", "Validation Rules",
-    "Alternate / Exception Behavior", "Permissions", "Inputs", "Outputs",
-    "Dependencies", "Acceptance Criteria", "Status",
+    "Acceptance Criteria",
 )
+FR_DERIVED_LABELS = (
+    "Introduced In", "Last Modified In", "Change Source", "Status",
+)
+FR_CONDITIONAL_LABELS = (
+    "Trigger", "Preconditions", "Inputs", "Outputs", "Validation Rules",
+    "Alternate / Exception Behavior", "Permissions", "Business Rules",
+    "Dependencies",
+)
+FR_OPTIONAL_LABELS = (
+    "Primary Behavior", "Priority", "Integration References",
+    "OPEN References", "Constraints", "State Transitions",
+)
+# Kept for reference/back-compat: every label that used to be enforced.
+FR_ACTIVE_LABELS = FR_CORE_LABELS[:-1] + FR_DERIVED_LABELS[:-1] \
+    + FR_CONDITIONAL_LABELS + ("Acceptance Criteria", "Status")
+APPLICABILITY_STATES = ("DEFINED", "NOT_APPLICABLE", "NOT_SPECIFIED",
+                        "PENDING_DECISION")
 FR_HISTORICAL_LABELS = (
     "Source Scope", "Introduced In", "Last Modified In", "Change Source", "Status",
 )
@@ -1153,7 +1181,104 @@ def _requirement_identity_map(blocks):
     return out
 
 
-def validate_fr_structure(fr_blocks):
+
+_LIST_ITEM_RE = re.compile(r"^[ \t]+(?:[-*+]|\d+[.)])[ \t]+(\S.*?)[ \t]*$")
+_STATE_TOKEN_RE = re.compile(
+    r"^(NOT_APPLICABLE|NOT_SPECIFIED|PENDING_DECISION)\b(.*)$",
+    re.IGNORECASE | re.DOTALL)
+_PENDING_REF_RE = re.compile(
+    r"\b(?:QST|ASM)-\d+\b|\b(?:SPEC-|SCP-|BRAND-)?OPEN-\d+\b")
+
+
+def _field_value(block, label):
+    """Value of a `Label:` field that may be given inline (`- **Label:** v`)
+    OR as an indented bullet / numbered list under the label
+    (`- **Label:**` + `  - item`). Multi-line values are joined with newlines
+    (the original item text is never rewritten). None when the field is
+    absent or has no value at all."""
+    core = r"[ \t]+".join(re.escape(p) for p in label.split())
+    pattern = re.compile(
+        r"^[ \t>*\-+|]*\**[ \t]*" + core
+        + r"[ \t]*\**[ \t]*[:|][ \t]*\**[ \t]*(.*?)[ \t]*\**[ \t]*\|?[ \t]*$",
+        re.IGNORECASE | re.MULTILINE)
+    m = pattern.search(block or "")
+    if not m:
+        return None
+    inline = m.group(1).strip().strip("*").strip().strip("`").strip()
+    if inline:
+        return inline
+    items = []
+    for line in (block or "")[m.end():].split("\n")[1:]:
+        lm = _LIST_ITEM_RE.match(line)
+        if not lm:
+            break
+        items.append(lm.group(1))
+    return "\n".join(items) if items else None
+
+
+def _is_bare_placeholder(value):
+    return norm_token((value or "").strip().rstrip(".").strip()) in NOT_APPLICABLE
+
+
+def classify_applicability(value):
+    """(state, detail, error). `state` is one of APPLICABILITY_STATES, or None
+    when `error` explains why the value is not a valid applicability
+    statement. A bare N/A / None / TBD placeholder is never DEFINED."""
+    text = (value or "").strip()
+    m = _STATE_TOKEN_RE.match(text)
+    if m:
+        token = m.group(1)
+        if token != token.upper():
+            return None, None, ("applicability state '{}' must be written in "
+                                "upper case.".format(token))
+        state = token.upper()
+        rest = re.sub(r"^[\s:\u2014\u2013(-]+", "", m.group(2)).strip()
+        rest = rest[:-1].strip() if rest.endswith(")") and "(" not in rest else rest
+        if state == "NOT_APPLICABLE":
+            if not rest or _is_bare_placeholder(rest):
+                return None, None, ("NOT_APPLICABLE requires a stated reason "
+                                    "(NOT_APPLICABLE: <why this does not apply>).")
+        elif state == "PENDING_DECISION":
+            if not _PENDING_REF_RE.search(rest):
+                return None, None, ("PENDING_DECISION must reference the "
+                                    "canonical Q&A record (QST-###/ASM-###).")
+        return state, rest, None
+    if not text or _is_bare_placeholder(text):
+        return None, None, ("a bare '{}' placeholder is not a valid value - use "
+                            "DEFINED text, NOT_APPLICABLE: <reason>, "
+                            "NOT_SPECIFIED or PENDING_DECISION: <QST-###>."
+                            .format(text))
+    return "DEFINED", text, None
+
+
+def _pending_reference_error(rid, label, detail, root, spec_text, approved):
+    """None when every cited Q&A / OPEN reference exists and (pre-approval)
+    is still unresolved; else an explanatory message."""
+    refs = sorted(set(_PENDING_REF_RE.findall(detail or "")))
+    qa_ids = [r for r in refs if r.startswith(("QST-", "ASM-"))]
+    open_ids = [r for r in refs if r not in qa_ids]
+    if root is None:
+        return "{} {}: cannot verify PENDING_DECISION without a project root.".format(rid, label)
+    records = {r["id"]: r for r in qac.qa_records(root)}
+    for ref in qa_ids:
+        rec = records.get(ref)
+        if rec is None:
+            return ("{} {} PENDING_DECISION cites {} but no such canonical Q&A "
+                    "record exists.".format(rid, label, ref))
+        status = norm_token(rec.get("status"))
+        if not approved and status in qac.CLAIMS_RESOLUTION_STATUSES:
+            return ("{} {} is PENDING_DECISION on {}, which is already {} - "
+                    "convert the field to its resolved DEFINED value.".format(
+                        rid, label, ref, status))
+    known_open = {i["id"] for i in parse_open_items(spec_text or "")}
+    for ref in open_ids:
+        if ref not in known_open:
+            return ("{} {} PENDING_DECISION cites {} which is not an open item "
+                    "of this Specification.".format(rid, label, ref))
+    return None
+
+
+def validate_fr_structure(fr_blocks, root=None, spec_text=None, approved=False):
     for rid, block in fr_blocks.items():
         status = norm_token(_field(block, "Status"))
         if status not in VALID_FR_STATUS:
@@ -1163,7 +1288,7 @@ def validate_fr_structure(fr_blocks):
                     rid, _field(block, "Status")),
             )
         if status == "ACTIVE":
-            for label in FR_ACTIVE_LABELS:
+            for label in FR_CORE_LABELS:
                 if label == "Source Scope":
                     if _nfr_field(block, FR_SOURCE_ALIASES) is None:
                         return deny(
@@ -1172,20 +1297,58 @@ def validate_fr_structure(fr_blocks):
                             "Requirement reference.".format(rid),
                         )
                     continue
-                val = _field(block, label)
+                val = _field_value(block, label)
                 if val is None:
                     return deny(
                         "PMO-SPEC-010",
-                        "active {} is missing the mandatory field "
+                        "active {} is missing the mandatory (core) field "
                         "'{}'.".format(rid, label),
                     )
-            ac = _field(block, "Acceptance Criteria")
-            if not ac or norm_token(ac) in NOT_APPLICABLE:
-                return deny(
-                    "PMO-SPEC-010",
-                    "active {} has empty / N/A Acceptance Criteria - it must be "
-                    "objective and testable.".format(rid),
-                )
+                if label == "Acceptance Criteria":
+                    if _is_bare_placeholder(val) or all(
+                            _is_bare_placeholder(i) for i in val.split("\n")):
+                        return deny(
+                            "PMO-SPEC-010",
+                            "active {} has empty / N/A Acceptance Criteria - it "
+                            "must be objective and testable.".format(rid),
+                        )
+                elif _is_bare_placeholder(val):
+                    return deny(
+                        "PMO-SPEC-010",
+                        "active {} core field '{}' has only a placeholder "
+                        "('{}') - a substantive value is required.".format(
+                            rid, label, val),
+                    )
+            for label in FR_DERIVED_LABELS:
+                if _field(block, label) is None:
+                    return deny(
+                        "PMO-SPEC-010",
+                        "active {} is missing the governance-derived field "
+                        "'{}'.".format(rid, label),
+                    )
+            for label in FR_CONDITIONAL_LABELS:
+                val = _field_value(block, label)
+                if val is None:
+                    return deny(
+                        "PMO-SPEC-010",
+                        "active {} is missing an applicability statement for "
+                        "'{}' (DEFINED value, NOT_APPLICABLE: <reason>, "
+                        "NOT_SPECIFIED or PENDING_DECISION: <QST-###>).".format(
+                            rid, label),
+                    )
+                state, detail, err = classify_applicability(val)
+                if err is not None:
+                    # An APPROVED baseline that was valid under the prior schema
+                    # keeps its legacy free-text values: no mass migration.
+                    if approved and not _STATE_TOKEN_RE.match(val.strip()):
+                        continue
+                    return deny("PMO-SPEC-010",
+                                "active {} field '{}': {}".format(rid, label, err))
+                if state == "PENDING_DECISION":
+                    perr = _pending_reference_error(
+                        rid, label, detail, root, spec_text, approved)
+                    if perr is not None:
+                        return deny("PMO-SPEC-010", perr)
         else:
             for label in FR_HISTORICAL_LABELS:
                 if label == "Source Scope":
@@ -1245,8 +1408,12 @@ def validate_nfr_structure(nfr_blocks):
                 "active {} is missing a Source Scope / evidence reference.".format(
                     rid),
             )
-        crit = _nfr_field(block, NFR_CRITERIA_ALIASES)
-        if not crit or norm_token(crit) in NOT_APPLICABLE:
+        crit = None
+        for _lbl in NFR_CRITERIA_ALIASES:
+            crit = _field_value(block, _lbl)
+            if crit is not None:
+                break
+        if not crit or all(_is_bare_placeholder(i) for i in crit.split("\n")):
             return deny(
                 "PMO-SPEC-011",
                 "active {} has empty acceptance / verification criteria - an "
@@ -1712,7 +1879,9 @@ def full_spec_validation(root, spec_text=None):
             return d
 
         fr_blocks = parse_fr_definitions(spec_text)
-        d = validate_fr_structure(fr_blocks)
+        approved_baseline = (meta.get("execution authorized") or "").strip().lower() == "true"
+        d = validate_fr_structure(fr_blocks, root=root, spec_text=spec_text,
+                                  approved=approved_baseline)
         if d is not None:
             return d
 

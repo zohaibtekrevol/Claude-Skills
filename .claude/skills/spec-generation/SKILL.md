@@ -439,6 +439,48 @@ Acceptance Criteria:      <objective, testable conditions — Section 13>
 Status:                   ACTIVE | DEFERRED | RETIRED
 ```
 
+### 12.1 Field policy and applicability states (PMO-SPEC-010)
+
+Every FR field belongs to exactly one class (authoritative definition:
+`specs-governance-guard.py` `FR_CORE_LABELS` / `FR_DERIVED_LABELS` /
+`FR_CONDITIONAL_LABELS` / `FR_OPTIONAL_LABELS` - reuse, never re-type):
+
+| Class | Fields | Rule |
+|---|---|---|
+| **CORE_REQUIRED** | `ID`, `Title`, `Module`, `Actor(s)`, `Requirement`, `Source Scope`/`Source Requirement`, `Acceptance Criteria` | substantive value; a bare `N/A`/`None`/`TBD` is rejected |
+| **GOVERNANCE_DERIVED** | `Introduced In`, `Last Modified In`, `Change Source`, `Status` (plus Intent/Q&A mapping, OPEN References, derived from the traceability tables and the Q&A register) | stamped from lifecycle state, never authored |
+| **CONDITIONALLY_REQUIRED** | `Trigger`, `Preconditions`, `Inputs`, `Outputs`, `Validation Rules`, `Alternate / Exception Behavior`, `Permissions`, `Business Rules`, `Dependencies` | exactly one explicit applicability state (below) |
+| **OPTIONAL** | `Primary Behavior`, `Priority`, `Integration References`, `Constraints`, `State Transitions`, `OPEN References` | absence is valid; preserve when present; never invent |
+
+Applicability states for CONDITIONALLY_REQUIRED fields, written on the field's
+own line (no separate serialization):
+
+* `DEFINED` - just the substantive value: `- **Trigger:** The customer confirms checkout.`
+* `NOT_APPLICABLE: <reason>` - the field logically does not apply (for example
+  a configuration requirement has no trigger). The reason is mandatory. Never
+  creates a PM question.
+* `NOT_SPECIFIED` - the source material does not define it and no material
+  decision is needed. Advisory; never a blocker and never a PM question. After
+  baseline approval, filling it in is a functional change and follows the
+  Feedback / Change Request rules.
+* `PENDING_DECISION: QST-###` - a genuine unresolved product/business decision
+  exists. It MUST cite a canonical Q&A record (`QST-###`/`ASM-###`) that is
+  still unresolved (OPEN / DEFERRED / NON_BLOCKING); once that record is
+  resolved the field must become `DEFINED` before approval. This is the only
+  state that surfaces to the PM Decision Inbox, through the Q&A record it cites.
+
+**Generator rules.** Use `DEFINED` only when the source evidences the value;
+`NOT_APPLICABLE` only when non-applicability is evident from the requirement's
+own nature; `NOT_SPECIFIED` when no evidence defines the value and no material
+decision is needed; `PENDING_DECISION` only for a real decision that already
+has (or, through `requirement-gathering`, gets) a canonical Q&A record. **Never
+invent a behavioural detail merely to avoid `NOT_SPECIFIED`, and never write a
+bare `N/A`/`None`/`TBD` in a conditional field** (an already-APPROVED legacy
+baseline keeps its old free-text values; nothing is mass-migrated).
+
+**Acceptance Criteria** may be one inline value or an indented bullet/numbered
+list under the label; both are recognised and criteria are never rewritten.
+
 - **One field per line.** Every field above is its own `- **Label:** value` line
   (or `Label: value`). Never combine fields on one line (for example
   `**Module:** X | **Actor(s):** Y` or `**Introduced In:** 0.1 | **Last
@@ -451,7 +493,7 @@ Status:                   ACTIVE | DEFERRED | RETIRED
 - `DEFERRED` and `RETIRED` FRs keep the ID and the historical fields; they may
   omit behavioural detail that no longer applies but must keep `Source Scope`,
   `Introduced In`, `Last Modified In`, `Change Source` and a reason.
-- `Module`, `Actor(s)`, `Source Scope` are mandatory for every active FR.
+- `Module`, `Actor(s)`, `Source Scope` are CORE_REQUIRED for every active FR (Section 12.1).
 - **NEW (no-Scope) path:** write `Source Requirement` in place of
   `Source Scope`, carrying `INT-REQ-*` and/or `QST-*` / `ASM-*` ids — the
   same mandatory field under its path-appropriate label (Section 7). Do not

@@ -19,6 +19,18 @@ editor. The ONLY supported layout transformations are:
      is a well-formed `**Label:** value` of a known combinable label
      (`COMBINABLE_LABELS`); anything else is ambiguous -> fail closed.
 
+  3. classify each MISSING conditional Functional Requirement field under the
+     applicability policy (`specs-governance-guard.py`, PMO-SPEC-010), without
+     inventing anything: `Business Rules` is derived from the Business Rules
+     table's own "Traced FRs" column (values, or NOT_APPLICABLE stating that no
+     rule traces to the requirement); every other missing conditional field is
+     `NOT_SPECIFIED` (the artifact does not define it - advisory, no PM
+     question). A bare legacy placeholder in a conditional field is mapped to
+     NOT_APPLICABLE (N/A, None) or NOT_SPECIFIED (TBD/TBC) with the original
+     text quoted. PENDING_DECISION is never auto-created: linking a field to a
+     Q&A decision is a human/Q&A-flow act. Acceptance Criteria bullets are
+     preserved verbatim (the parser understands the list form).
+
 Anything the parser cannot prove (an `ID` field that disagrees with its
 heading, an unrecognised combined line, a missing mandatory field whose value
 would have to be invented, multi-line acceptance criteria the validator
@@ -260,6 +272,155 @@ def layout_equivalent(before, after):
 
 
 # --------------------------------------------------------------------------- #
+# Applicability classification (PMO-SPEC-010 policy) - additive only
+# --------------------------------------------------------------------------- #
+
+def _br_trace_map(text):
+    """{FR-id: [BR-id, ...]} from the Business Rules table's 'Traced FRs'
+    column (the authoritative BR->FR trace); {} when there is no table."""
+    tbl = specs_guard._table_after(text, r"business\s+rules")
+    if tbl is None:
+        return {}
+    header, rows = tbl
+    id_idx = specs_guard._col_index(header, "id", "br", "rule id")
+    tr_idx = specs_guard._col_index(header, "traced frs", "traced fr", "traces to",
+                                    "related fr", "traced")
+    if id_idx is None:
+        id_idx = 0
+    out = {}
+    if tr_idx is None:
+        return out
+    for row in rows:
+        if id_idx < len(row) and tr_idx < len(row):
+            bid = row[id_idx].strip().strip("`*")
+            if re.match(r"^BR-\d+$", bid):
+                for fr in re.findall(r"FR-\d+", row[tr_idx]):
+                    out.setdefault(fr, []).append(bid)
+    return out
+
+
+_NA_WORDS = ("N_A", "NA", "NONE")
+
+
+def _is_classification_statement(label, value):
+    """An ADDED conditional field may only be NOT_APPLICABLE (with reason),
+    NOT_SPECIFIED, or the Business Rules list derived from the BR table -
+    never an invented DEFINED value."""
+    state, _d, err = specs_guard.classify_applicability(value)
+    if err is None and state in ("NOT_APPLICABLE", "NOT_SPECIFIED"):
+        return True
+    return label == "Business Rules" and bool(re.match(r"^BR-\d+(, BR-\d+)*$", value or ""))
+
+
+def classify_conditional_fields(text):
+    """Return (new_text, stats). Adds a missing applicability statement to
+    each ACTIVE FR block and normalizes bare legacy placeholders. Pure text
+    transformation; raises Ambiguous when a CORE field holds a placeholder."""
+    lines = text.split("\n")
+    trace = _br_trace_map(text)
+    stats = {"added_not_specified": 0, "added_business_rules_defined": 0,
+             "added_business_rules_not_applicable": 0,
+             "placeholders_to_not_applicable": 0, "placeholders_to_not_specified": 0}
+    out = []
+    cur = 0
+    for start, end, rid, title in find_blocks(lines):
+        if not rid.startswith("FR-"):
+            continue
+        out.extend(lines[cur:start + 1])
+        body = list(lines[start + 1:end])
+        cur = end
+        block_text = "\n".join(body)
+        status = specs_guard.norm_token(specs_guard._field(block_text, "Status"))
+        if status != "ACTIVE":
+            out.extend(body)
+            continue
+        for label in specs_guard.FR_CORE_LABELS:
+            if label == "Source Scope":
+                continue
+            v = specs_guard._field_value(block_text, label)
+            if v is not None and specs_guard._is_bare_placeholder(v) \
+                    and label != "Acceptance Criteria":
+                raise Ambiguous("{} core field '{}' holds a placeholder".format(rid, label))
+        # in-place normalization of bare placeholders
+        for i, l in enumerate(body):
+            fm = _FIELD_LINE_RE.match(l)
+            if not fm or fm.group(1) not in specs_guard.FR_CONDITIONAL_LABELS:
+                continue
+            val = fm.group(2).strip()
+            if val and specs_guard._is_bare_placeholder(val):
+                kind = specs_guard.norm_token(val.rstrip(".").strip())
+                if kind in _NA_WORDS:
+                    body[i] = '- **{}:** NOT_APPLICABLE: legacy placeholder "{}" normalized by {}'.format(
+                        fm.group(1), val, OPERATION)
+                    stats["placeholders_to_not_applicable"] += 1
+                else:
+                    body[i] = "- **{}:** NOT_SPECIFIED".format(fm.group(1))
+                    stats["placeholders_to_not_specified"] += 1
+        block_text = "\n".join(body)
+        adds = []
+        for label in specs_guard.FR_CONDITIONAL_LABELS:
+            if specs_guard._field_value(block_text, label) is not None:
+                continue
+            if label == "Business Rules":
+                if trace.get(rid):
+                    adds.append("- **Business Rules:** " + ", ".join(sorted(set(trace[rid]))))
+                    stats["added_business_rules_defined"] += 1
+                else:
+                    adds.append("- **Business Rules:** NOT_APPLICABLE: no Business Rule "
+                                "in the Business Rules table traces to this requirement")
+                    stats["added_business_rules_not_applicable"] += 1
+            else:
+                adds.append("- **{}:** NOT_SPECIFIED".format(label))
+                stats["added_not_specified"] += 1
+        if adds:
+            last = len(body) - 1
+            while last >= 0 and not body[last].strip():
+                last -= 1
+            body[last + 1:last + 1] = adds
+        out.extend(body)
+    out.extend(lines[cur:])
+    return "\n".join(out), stats
+
+
+def classification_is_additive(before, after):
+    """Independent proof for the classification stage: identical blocks and
+    outside-block content; every original field kept in order and value
+    (except a bare legacy placeholder mapped to an applicability statement);
+    everything else is an appended conditional field carrying a valid state
+    (or the derived Business Rules list)."""
+    try:
+        rb = semantic_records(before)
+        ra = semantic_records(after)
+    except Ambiguous as exc:
+        return False, str(exc)
+    if [(r, t) for r, t, _f in rb] != [(r, t) for r, t, _f in ra]:
+        return False, "requirement identifiers / titles / order changed."
+    if outside_blocks(before) != outside_blocks(after):
+        return False, "content outside the FR/NFR blocks changed."
+    cond = specs_guard.FR_CONDITIONAL_LABELS
+    for (rid, _t, fb), (_r, _t2, fa) in zip(rb, ra):
+        if len(fa) < len(fb):
+            return False, "{} lost field(s).".format(rid)
+        for (lb, vb), (la, va) in zip(fb, fa):
+            if lb != la:
+                return False, "{} field order/label changed.".format(rid)
+            if vb == va:
+                continue
+            if lb in cond and specs_guard._is_bare_placeholder(vb):
+                state, _d, err = specs_guard.classify_applicability(va)
+                if err is None and state in ("NOT_APPLICABLE", "NOT_SPECIFIED"):
+                    continue
+            return False, "{} field '{}' value changed.".format(rid, lb)
+        present = {l for l, _v in fb}
+        for la, va in fa[len(fb):]:
+            if la not in cond or la in present:
+                return False, "{} gained a non-conditional or duplicate field '{}'.".format(rid, la)
+            if not _is_classification_statement(la, va):
+                return False, "{} added field '{}' is not a permitted classification.".format(rid, la)
+    return True, None
+
+
+# --------------------------------------------------------------------------- #
 # Candidate construction (layout + existing repair primitives)
 # --------------------------------------------------------------------------- #
 
@@ -276,8 +437,21 @@ def build_candidate(root, content):
     if not ok:
         return None, None, deny("PMO-SCHEMA-MIG-007", why)
     plan = {"layout": stats, "classes": ["LAYOUT_CANONICALIZATION"],
-            "provenance": {}, "metadata": {}, "missing_sections": []}
+            "provenance": {}, "metadata": {}, "missing_sections": [],
+            "applicability": {}}
     cand = layout
+    try:
+        classified, cstats = classify_conditional_fields(cand)
+    except Ambiguous as exc:
+        return None, None, deny("PMO-SCHEMA-MIG-006",
+                                "ambiguous classification - refusing: {}".format(exc))
+    if classified != cand:
+        ok, why = classification_is_additive(cand, classified)
+        if not ok:
+            return None, None, deny("PMO-SCHEMA-MIG-007", why)
+        cand = classified
+        plan["classes"].append("APPLICABILITY_CLASSIFICATION")
+        plan["applicability"] = cstats
 
     eligible, _tot, excluded = src.find_provenance_occurrences(cand)
     if eligible:
@@ -332,18 +506,37 @@ def build_candidate(root, content):
 
 
 def final_equivalence(before, after):
-    """Whole-transaction semantic proof: every block record identical modulo
-    the one approved provenance token substitution; block text outside
-    blocks may differ only by the approved repair primitives (checked
-    stage-by-stage in build_candidate)."""
-    def norm(recs):
+    """Whole-transaction semantic proof: per block, every original field is
+    kept in order with an identical value - modulo (a) the one approved
+    provenance token substitution and (b) bare legacy placeholders mapped to
+    an applicability statement - and anything else is an appended conditional
+    field. Content outside the blocks may differ only by the approved repair
+    primitives (each checked stage-by-stage in build_candidate)."""
+    def norm(text):
+        recs = semantic_records(text)
         return [(r, t, [(l, v.replace(src.NONCANONICAL_INITIAL_TOKEN,
                                       src.CANONICAL_NEW_INITIAL_TOKEN) if l == "Change Source" else v)
                         for l, v in f]) for r, t, f in recs]
     try:
-        return norm(semantic_records(before)) == norm(semantic_records(after))
+        nb, na = norm(before), norm(after)
     except Ambiguous:
         return False
+    if [(r, t) for r, t, _f in nb] != [(r, t) for r, t, _f in na]:
+        return False
+    cond = specs_guard.FR_CONDITIONAL_LABELS
+    for (_r, _t, fb), (_r2, _t2, fa) in zip(nb, na):
+        if len(fa) < len(fb):
+            return False
+        for (lb, vb), (la, va) in zip(fb, fa):
+            if lb != la:
+                return False
+            if vb != va and not (lb in cond and specs_guard._is_bare_placeholder(vb)):
+                return False
+        present = {l for l, _v in fb}
+        if any(la not in cond or la in present or not _is_classification_statement(la, va)
+               for la, va in fa[len(fb):]):
+            return False
+    return True
 
 
 # --------------------------------------------------------------------------- #

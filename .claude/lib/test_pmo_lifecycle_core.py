@@ -184,13 +184,13 @@ def build_specs(exec_auth="false", spec_version="0.1", include_validation_summar
 - **Preconditions:** The customer is authenticated.
 - **Trigger:** The customer confirms checkout.
 - **Primary Behavior:** The system validates the cart and records the order.
-- **Business Rules:** N/A
+- **Business Rules:** NOT_APPLICABLE: no business rule applies to this requirement
 - **Validation Rules:** The cart must be non-empty.
 - **Alternate / Exception Behavior:** If payment fails the order is not created.
 - **Permissions:** A B2C customer may place their own order.
 - **Inputs:** Cart contents.
 - **Outputs:** A persisted order.
-- **Dependencies:** N/A
+- **Dependencies:** NOT_APPLICABLE: no dependency applies to this requirement
 - **Acceptance Criteria:** Given a valid cart When checkout is confirmed Then an order is created.
 - **Status:** ACTIVE
 

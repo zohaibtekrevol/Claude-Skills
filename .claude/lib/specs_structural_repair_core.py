@@ -228,6 +228,33 @@ def _last_numbered_heading(spec_text):
 # Deterministic derivation - Validation Summary only (see module docstring)
 # --------------------------------------------------------------------------- #
 
+def applicability_counts(spec_text):
+    """{state: n} over every conditional field of every ACTIVE FR, using the
+    guard's own block parser and classifier (never a second one)."""
+    counts = {st: 0 for st in specs_guard.APPLICABILITY_STATES}
+    for _rid, block in specs_guard.parse_fr_definitions(spec_text or "").items():
+        for label in specs_guard.FR_CONDITIONAL_LABELS:
+            val = specs_guard._field_value(block, label)
+            if val is None:
+                continue
+            state, _d, err = specs_guard.classify_applicability(val)
+            if err is None:
+                counts[state] += 1
+    return counts
+
+
+def _applicability_note(spec_text):
+    c = applicability_counts(spec_text)
+    if not (c["NOT_SPECIFIED"] or c["PENDING_DECISION"] or c["NOT_APPLICABLE"]):
+        return ""
+    return ("**Detail completeness.** Conditional Functional Requirement "
+            "fields: {} DEFINED, {} NOT_APPLICABLE, {} NOT_SPECIFIED (the "
+            "source does not define them - advisory, not a blocker), {} "
+            "PENDING_DECISION (each linked to a canonical Q&A record).\n".format(
+                c["DEFINED"], c["NOT_APPLICABLE"], c["NOT_SPECIFIED"],
+                c["PENDING_DECISION"]))
+
+
 def derive_validation_summary(root, spec_text):
     """Compute the ## Validation Summary section body from facts already
     present in `spec_text` / already-governed state - never fabricated,
@@ -282,6 +309,7 @@ def derive_validation_summary(root, spec_text):
         "`PARTIALLY_COVERED` with a named blocking Q&A/OPEN reference - "
         "none is dropped silently.".format(covered, total_trace),
         "",
+        _applicability_note(spec_text),
         "**Open items.** {} deferred/non-blocking item(s) remain visible "
         "and traceable to their governing Q&A/Intent id; none is silently "
         "resolved by this repair.".format(open_count),
