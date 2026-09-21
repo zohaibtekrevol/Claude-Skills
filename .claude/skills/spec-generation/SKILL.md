@@ -697,6 +697,16 @@ Rules:
 
 ## 21. Feedback and Change-Request update model
 
+### 21.0 Governed mechanisms after baseline approval
+
+Once `specs.md` is an approved baseline it is never edited directly. Feedback
+reaches it through exactly one of: `NO_ARTIFACT_CHANGE` (no edit),
+`FEEDBACK_AMENDMENT` (a wording-only correction proven by
+`specs-feedback-amendment.py`: next minor version, `Execution Authorized: false`,
+fresh PM approval and its own publication) or the Change Request lifecycle
+(everything substantive). The rules in 21.1 below describe the Change Source /
+Change History discipline those paths share.
+
 ### 21.1 Feedback that updates `specs.md` only
 
 The **Feedback Classification** workflow decides disposition **first**. By

@@ -597,6 +597,25 @@ Use only the Phase-1 vocabulary from `feedback-tracker.md` §6: `OPEN`,
 
 ---
 
+## 16a. Outcome of a recorded item against an APPROVED baseline
+
+This Skill still never writes `specs.md`. Once an item is recorded and
+classified, what happens to an approved Specs baseline is decided by exactly
+one of three outcomes (assessed read-only by `specs-feedback-amendment.py
+assess`, never by this Skill's own judgement of "meaning unchanged"):
+
+| Outcome | Meaning | Mechanism |
+|---|---|---|
+| `NO_ARTIFACT_CHANGE` | Feedback needs no Specs edit (resolved / duplicate / not actionable) | `specs-feedback-amendment.py resolve-no-change`; Specs, approval, publication and version untouched |
+| `FEEDBACK_AMENDMENT` | A wording-only correction (typo, capitalization, punctuation, grammar, declared terminology equivalence or uniform rename) that is PROVEN not to change requirement meaning | `specs-feedback-amendment.py begin / finalize`: next minor Specs version, `Execution Authorized: false`, Change History row, Feedback-Item `Change Source`, previous approval and bytes archived; needs fresh PM approval and its own publication |
+| `CHANGE_REQUEST_REQUIRED` | Anything substantive (requirements, actors, workflow, permissions, acceptance outcomes, business rules, integrations, numbers, identifiers, applicability states, mappings, tables, headings) | The existing CR lifecycle (Section 12); nothing is written and no CR is created automatically |
+
+A Specs amendment may start only from a canonical Feedback Item recorded here
+(never a direct edit followed by retroactive Feedback) whose own text attests the
+requested correction. PM-facing wording never exposes guard codes.
+
+---
+
 ## 17. No Scope / Specs / Intent mutation — integrity checks
 
 Before starting any write in a processing run, compute a content hash (or

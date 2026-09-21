@@ -233,7 +233,7 @@ NFR_CRITERIA_ALIASES = (
 
 PERMITTED_CHANGE_SOURCE_RE = re.compile(
     r"^(?:INITIAL_SCOPE|INITIAL_INTENT|SCOPE[-_]RECONCILIATION|PM[-_]DECISION"
-    r"|FDB-\d+|CR-\d+|QST-\d+|ASM-\d+"
+    r"|FDB-\d+|FB-\d{4}-\d{3}-\d{3}|CR-\d+|QST-\d+|ASM-\d+"
     r"|SCOPE\s*V?\d+(?:\.\d+)*(?:\s*\([^)]*\))?)$",
     re.IGNORECASE,
 )
@@ -1521,9 +1521,13 @@ def _change_source_tokens(value):
     return [t for t in re.split(r"[,;/]|\s{2,}", value or "") if t.strip()]
 
 
+_FEEDBACK_ID_RE = re.compile(r"FDB-\d+|FB-\d{4}-\d{3}-\d{3}", re.I)
+
+
 def known_feedback_ids(root):
-    """Set of FDB-XXX ids known to the feedback subsystem, or None if it does
-    not exist yet."""
+    """Set of feedback ids (legacy FDB-XXX and canonical Feedback Item ids
+    FB-YYYY-NNN-NNN) known to the feedback subsystem, or None if it does not
+    exist yet."""
     found = set()
     exists = False
     for rel in FEEDBACK_DIRS:
@@ -1531,13 +1535,14 @@ def known_feedback_ids(root):
         if not os.path.isdir(d):
             continue
         exists = True
-        for name in os.listdir(d):
-            for m in re.finditer(r"FDB-\d+", name, re.I):
-                found.add(m.group(0).upper())
-            if name.lower().endswith((".md", ".yaml", ".yml", ".json", ".txt")):
-                txt = read_text(os.path.join(d, name)) or ""
-                for m in re.finditer(r"FDB-\d+", txt, re.I):
+        for cur, _dirs, names in os.walk(d):
+            for name in names:
+                for m in _FEEDBACK_ID_RE.finditer(name):
                     found.add(m.group(0).upper())
+                if name.lower().endswith((".md", ".yaml", ".yml", ".json", ".txt")):
+                    txt = read_text(os.path.join(cur, name)) or ""
+                    for m in _FEEDBACK_ID_RE.finditer(txt):
+                        found.add(m.group(0).upper())
     return found if exists else None
 
 
@@ -1579,10 +1584,11 @@ def validate_change_provenance(fr_blocks, nfr_blocks, feedback_ids=None,
                 return deny(
                     "PMO-SPEC-014",
                     "{} has an invalid Change Source token '{}' (allowed: "
-                    "INITIAL_SCOPE, SCOPE-RECONCILIATION, PM-DECISION, FDB-XXX, "
+                    "INITIAL_SCOPE, INITIAL_INTENT, SCOPE-RECONCILIATION, "
+                    "PM-DECISION, FDB-XXX / FB-YYYY-NNN-NNN, "
                     "CR-XXX, 'Scope vX.Y').".format(rid, tok),
                 )
-            fm = re.match(r"^FDB-\d+$", tok, re.I)
+            fm = re.match(r"^(?:FDB-\d+|FB-\d{4}-\d{3}-\d{3})$", tok, re.I)
             if fm and feedback_ids is not None and tok.upper() not in {
                     i.upper() for i in feedback_ids}:
                 return deny(

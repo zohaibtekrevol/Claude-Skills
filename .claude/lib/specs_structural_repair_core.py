@@ -613,6 +613,11 @@ def pre_baseline_concurrency_gate(root, meta, ignore_schema_migration_marker=Fal
             "with it.",
         )
 
+    if os.path.exists(os.path.join(root, ".pmo", "specs-feedback-amendment-transaction.json")):
+        return None, deny(
+            "PMO-SPEC-REPAIR-009",
+            "a FEEDBACK_AMENDMENT transaction marker exists - resolve "
+            "(finalize/abort) it before another Specs transaction.")
     if (not ignore_schema_migration_marker and os.path.exists(
             os.path.join(root, *SCHEMA_MIGRATION_MARKER_RELPATH_PARTS))):
         return None, deny(
