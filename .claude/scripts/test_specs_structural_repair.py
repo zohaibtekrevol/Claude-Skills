@@ -11,6 +11,7 @@ project artifact is ever created, read as a mutable fixture, or modified.
 
 import importlib.util
 import json
+import re
 import os
 import shutil
 import sys
@@ -801,6 +802,347 @@ def test_29_unsupported_failure_class_rejected():
         _cleanup(root)
 
 
+# --------------------------------------------------------------------------- #
+# Governed recovery (abort) + NEW-lifecycle Change Source provenance
+# --------------------------------------------------------------------------- #
+
+def _specs_path(root):
+    return os.path.join(root, "docs", "pmo", "specs", "specs.md")
+
+
+def _marker_path(root):
+    return os.path.join(root, ".pmo", "specs-structural-repair-transaction.json")
+
+
+def _failed_finalize_root():
+    """A project whose repair fails closed at finalize (PMO-SPEC-013 on an
+    initial row carrying an unrepairable non-canonical Change Source), leaving the marker."""
+    root = mkroot()
+    text = open(_specs_path(root)).read()
+    text = text.replace("| 2026-09-11 | INITIAL_INTENT | FR-001 | Initial provisional "
+                        "specification generated from validated Intent + resolved Q&A |",
+                        "| 2026-09-11 | BOGUS_SOURCE | FR-001 | Initial provisional "
+                        "specification baseline |")
+    _w(_specs_path(root), text)
+    return root
+
+
+def test_51_failed_transaction_can_be_governedly_aborted():
+    root = _failed_finalize_root()
+    try:
+        b = cli.cmd_begin(root, "repair")
+        f = cli.cmd_finalize(root)
+        check("51/begin_active", b["status"] == "ACTIVE", b)
+        check("51/finalize_failed_closed", f["status"] == "RECOVERY_REQUIRED", f)
+        check("51/marker_left_behind", os.path.exists(_marker_path(root)))
+        before = open(_specs_path(root), "rb").read()
+        a = cli.cmd_abort(root, "finalize failed closed")
+        check("51/aborted", a["status"] == "ABORTED", a)
+        check("51/marker_removed", not os.path.exists(_marker_path(root)))
+        check("51/specs_byte_identical", open(_specs_path(root), "rb").read() == before)
+        check("51/no_approval_created", not os.path.exists(
+            os.path.join(root, ".pmo", "approvals", "specs-approval.yaml")))
+        check("51/no_cr_marker", not os.path.exists(
+            os.path.join(root, ".pmo", "change-request-transaction.json")))
+        check("51/status_no_transaction", cli.cmd_status(root)["status"] == "NO_TRANSACTION")
+    finally:
+        _cleanup(root)
+
+
+def test_52_abort_requires_reason_and_marker():
+    root = mkroot()
+    try:
+        check("52/no_marker_no_transaction",
+              cli.cmd_abort(root, "x")["status"] == "NO_TRANSACTION")
+        cli.cmd_begin(root, "repair")
+        r = cli.cmd_abort(root, "   ")
+        check("52/empty_reason_blocked", code_of(r) == "PMO-SPEC-REPAIR-020", r)
+        check("52/marker_kept", os.path.exists(_marker_path(root)))
+    finally:
+        _cleanup(root)
+
+
+def test_53_finalized_transaction_cannot_be_aborted():
+    root = mkroot()
+    try:
+        cli.cmd_begin(root, "repair")
+        marker_text = open(_marker_path(root)).read()
+        f = cli.cmd_finalize(root)
+        check("53/finalized", f["status"] == "REPAIRED", f)
+        check("53/marker_removed_by_finalize", not os.path.exists(_marker_path(root)))
+        check("53/abort_after_finalize_no_transaction",
+              cli.cmd_abort(root, "x")["status"] == "NO_TRANSACTION")
+        # Even if a stale copy of the marker reappears, the changed specs.md
+        # hash makes the state ambiguous and abort must refuse.
+        _w(_marker_path(root), marker_text)
+        after = open(_specs_path(root), "rb").read()
+        r = cli.cmd_abort(root, "x")
+        check("53/stale_marker_abort_blocked", code_of(r) == "PMO-SPEC-REPAIR-022", r)
+        check("53/specs_untouched", open(_specs_path(root), "rb").read() == after)
+        check("53/marker_kept", os.path.exists(_marker_path(root)))
+    finally:
+        _cleanup(root)
+
+
+def test_54_abort_fails_closed_on_ambiguous_marker():
+    root = mkroot()
+    try:
+        cli.cmd_begin(root, "repair")
+        with open(_specs_path(root), "a") as fh:
+            fh.write("\nedited\n")
+        r = cli.cmd_abort(root, "x")
+        check("54/edited_specs_blocked", code_of(r) == "PMO-SPEC-REPAIR-022", r)
+        check("54/marker_kept", os.path.exists(_marker_path(root)))
+        _w(_marker_path(root), "{not json")
+        r = cli.cmd_abort(root, "x")
+        check("54/invalid_marker_blocked", code_of(r) == "PMO-SPEC-REPAIR-015", r)
+        check("54/invalid_marker_kept", os.path.exists(_marker_path(root)))
+    finally:
+        _cleanup(root)
+
+
+def test_55_abort_rejects_cr_marker_masquerade():
+    root = mkroot()
+    try:
+        _w(_marker_path(root), json.dumps({"operation": "CR_INCORPORATION"}))
+        r = cli.cmd_abort(root, "x")
+        check("55/cr_style_marker_blocked", code_of(r) == "PMO-SPEC-REPAIR-015", r)
+        check("55/marker_kept", os.path.exists(_marker_path(root)))
+    finally:
+        _cleanup(root)
+
+
+def _initial_row_validation(source, summary="Initial provisional specification"):
+    root = mkroot(specs=build_specs(include_validation_summary=True))
+    try:
+        text = open(_specs_path(root)).read()
+        text = text.replace(
+            "| INITIAL_INTENT | FR-001 | Initial provisional specification generated "
+            "from validated Intent + resolved Q&A |",
+            "| {} | FR-001 | {} |".format(source, summary))
+        return core.specs_guard.full_spec_validation(root, spec_text=text)
+    finally:
+        _cleanup(root)
+
+
+def test_56_new_lifecycle_change_source_provenance():
+    ok = _initial_row_validation("INITIAL_INTENT")
+    check("56/new_path_initial_intent_valid", ok is None, ok)
+    scope = _initial_row_validation("INITIAL_SCOPE")
+    check("56/legacy_initial_scope_row_not_rejected_by_013",
+          scope is None or scope.code != "PMO-SPEC-013", scope)
+    for bad in ("INITIAL_SPECS_GENERATION", "SOMETHING_ELSE"):
+        d = _initial_row_validation(bad)
+        check("56/{}_rejected".format(bad.lower()),
+              d is not None and d.code == "PMO-SPEC-013", d)
+
+
+# --------------------------------------------------------------------------- #
+# CHANGE_SOURCE_PROVENANCE_REPAIR
+# --------------------------------------------------------------------------- #
+TOK = core.NONCANONICAL_INITIAL_TOKEN
+CANON = core.CANONICAL_NEW_INITIAL_TOKEN
+HIST_CANON = ("| INITIAL_INTENT | FR-001 | Initial provisional specification generated "
+              "from validated Intent + resolved Q&A |")
+
+
+def provenance_specs(include_validation_summary=True, malformed_gf=False, prose=False):
+    """Mirrors the real WM Trucking defect: the FR Change Source line and the
+    Change History row carry the non-canonical token (row with a descriptive
+    parenthetical, exactly as generated)."""
+    text = build_specs(include_validation_summary=include_validation_summary)
+    text = text.replace("- **Change Source:** INITIAL_INTENT\n",
+                        "- **Change Source:** {}\n".format(TOK))
+    text = text.replace(
+        HIST_CANON,
+        "| {} (Intent v0.3 + Q&A register, NEW no-Scope path) | FR-001 | Initial "
+        "provisional specification generated from validated Intent + resolved Q&A |".format(TOK))
+    if malformed_gf:
+        text = text.replace(
+            "- **Generated From:** docs/pmo/requirements/questions-and-assumptions.md\n",
+            "- **Generated From:** docs/pmo/requirements/questions-and-assumptions.md "
+            "(+ docs/pmo/intent/intent.md v1.0)\n")
+    if prose:
+        text = text.replace("## Open Questions",
+                            "Note: the token {} is discussed in prose here.\n\n## Open Questions".format(TOK), 1)
+    return text
+
+
+def test_60_provenance_repair_normalizes_only_governed_fields():
+    text = provenance_specs(prose=True)
+    root = mkroot(specs=text)
+    try:
+        b = cli.cmd_begin(root, "normalize provenance")
+        check("60/begin_active", b["status"] == "ACTIVE", b)
+        check("60/only_provenance_class",
+              b["plan"]["repair_classes"] == [core.REPAIR_CLASS_PROVENANCE], b["plan"])
+        pf = b["plan"]["provenance_fixes"]
+        check("60/counts", pf["field_lines"] == 1 and pf["history_rows"] == 1
+              and pf["excluded_non_provenance"] == 1, pf)
+        f = cli.cmd_finalize(root)
+        # the prose mention is deliberately left alone, so full validation
+        # must still pass (prose is not a governed field)
+        check("60/finalize_repaired", f["status"] == "REPAIRED", f)
+        after = open(_specs_path(root)).read()
+        check("60/field_and_row_normalized",
+              "- **Change Source:** INITIAL_INTENT\n" in after
+              and "| INITIAL_INTENT (Intent v0.3 + Q&A register, NEW no-Scope path) |" in after)
+        check("60/prose_untouched", "the token {} is discussed in prose".format(TOK) in after)
+        exp = text.replace("- **Change Source:** {}\n".format(TOK), "- **Change Source:** INITIAL_INTENT\n") \
+                  .replace("| {} (Intent".format(TOK), "| INITIAL_INTENT (Intent")
+        check("60/everything_else_byte_identical", after == exp)
+        check("60/fr_ids_identical", re.findall(r"(?m)^###\s+(FR-\d+)", after)
+              == re.findall(r"(?m)^###\s+(FR-\d+)", text))
+        check("60/validation_passes", core.specs_guard.full_spec_validation(root) is None)
+        check("60/exec_still_false", "**Execution Authorized:** false" in after
+              or "Execution Authorized: false" in after)
+        check("60/no_approval", not os.path.exists(
+            os.path.join(root, ".pmo", "approvals", "specs-approval.yaml")))
+        check("60/no_cr_or_feedback", not os.path.exists(os.path.join(root, "docs", "pmo", "cr"))
+              and not os.path.exists(os.path.join(root, "docs", "pmo", "feedback")))
+    finally:
+        _cleanup(root)
+
+
+def test_61_three_class_combined_repair():
+    root = mkroot(specs=provenance_specs(include_validation_summary=False, malformed_gf=True))
+    try:
+        b = cli.cmd_begin(root, "three-class repair")
+        check("61/all_three_classes", b["plan"]["repair_classes"] == [
+            core.REPAIR_CLASS_MISSING_SECTION, core.REPAIR_CLASS_METADATA,
+            core.REPAIR_CLASS_PROVENANCE], b)
+        before = open(_specs_path(root)).read()
+        f = cli.cmd_finalize(root)
+        check("61/finalize_repaired", f["status"] == "REPAIRED", f)
+        after = open(_specs_path(root)).read()
+        check("61/full_validation_passes", core.specs_guard.full_spec_validation(root) is None)
+        check("61/generated_from_canonical",
+              "- **Generated From:** docs/pmo/requirements/questions-and-assumptions.md\n" in after)
+        check("61/validation_summary_added", "Validation Summary" in after)
+        check("61/no_noncanonical_token_left", TOK not in after)
+        check("61/fr_ids_identical", re.findall(r"(?m)^###\s+(FR-\d+)", after)
+              == re.findall(r"(?m)^###\s+(FR-\d+)", before))
+        check("61/version_unchanged", "**Spec Version:** 0.1" in after or "Spec Version: 0.1" in after)
+    finally:
+        _cleanup(root)
+
+
+def test_62_provenance_blocked_when_not_new_lifecycle():
+    scope = "# Scope\n\n- **Scope Version:** 0.1\n"
+    root = mkroot(specs=provenance_specs())
+    try:
+        _w(os.path.join(root, "docs", "pmo", "scope", "scope-v0.1.md"), scope)
+        r = cli.cmd_begin(root, "x")
+        check("62/legacy_scope_governs_blocked", code_of(r) == "PMO-SPEC-REPAIR-024", r)
+        check("62/no_marker", not os.path.exists(_marker_path(root)))
+    finally:
+        _cleanup(root)
+    root = mkroot(specs=provenance_specs())
+    try:
+        _w(os.path.join(root, "docs", "pmo", "scope", "stray.txt"), "?")
+        r = cli.cmd_begin(root, "x")
+        check("62/ambiguous_scope_dir_blocked", code_of(r) == "PMO-SPEC-REPAIR-025", r)
+    finally:
+        _cleanup(root)
+    root = mkroot(specs=provenance_specs(), approval="")
+    try:
+        os.remove(os.path.join(root, ".pmo", "approvals", "intent-approval.yaml"))
+        r = cli.cmd_begin(root, "x")
+        check("62/missing_intent_approval_blocked", code_of(r) == "PMO-SPEC-REPAIR-026", r)
+    finally:
+        _cleanup(root)
+    root = mkroot(specs=provenance_specs())
+    try:
+        os.remove(os.path.join(root, "docs", "pmo", "requirements", "questions-and-assumptions.md"))
+        r = cli.cmd_begin(root, "x")
+        check("62/missing_qa_blocked",
+              code_of(r) in ("PMO-SPEC-REPAIR-026", "PMO-SPEC-REPAIR-017")
+              and not os.path.exists(_marker_path(root)), r)
+        d = core.prove_new_lifecycle_provenance(root)
+        check("62/missing_qa_not_proven_new_lifecycle",
+              d is not None and d.code == "PMO-SPEC-REPAIR-026", d)
+    finally:
+        _cleanup(root)
+
+
+def test_63_provenance_blocked_when_approved():
+    root = mkroot(specs=provenance_specs().replace(
+        "**Execution Authorized:** false", "**Execution Authorized:** true"))
+    try:
+        r = cli.cmd_begin(root, "x")
+        check("63/exec_true_blocked", code_of(r) == "PMO-SPEC-REPAIR-003", r)
+    finally:
+        _cleanup(root)
+    root = mkroot(specs=provenance_specs(), specs_approval=matching_specs_approval())
+    try:
+        r = cli.cmd_begin(root, "x")
+        check("63/existing_approval_blocked", code_of(r) == "PMO-SPEC-REPAIR-004", r)
+    finally:
+        _cleanup(root)
+
+
+def test_64_provenance_mutation_boundary():
+    base = provenance_specs()
+    fixed = core.apply_provenance_fix(base)
+    check("64/valid_fix_is_token_only", core.provenance_fix_is_token_only(base, fixed)[0])
+    check("64/fix_is_idempotent", core.apply_provenance_fix(fixed) == fixed)
+    # INITIAL_SCOPE / INITIAL_INTENT / CR / FDB / QST sources are never rewritten
+    for src in ("INITIAL_SCOPE", "INITIAL_INTENT", "CR-001", "FDB-002", "QST-003", "PM-DECISION"):
+        t = base.replace("- **Change Source:** {}\n".format(TOK), "- **Change Source:** {}\n".format(src))
+        t = t.replace("| {} (Intent".format(TOK), "| {} (Intent".format(src))
+        check("64/{}_not_rewritten".format(src.lower()),
+              core.find_provenance_occurrences(t)[0] == [] and core.apply_provenance_fix(t) == t)
+    # arbitrary replacement / content / version / identifier mutation rejected
+    def rej(name, after):
+        check("64/reject_" + name, not core.provenance_fix_is_token_only(base, after)[0])
+    rej("arbitrary_source", fixed.replace("- **Change Source:** INITIAL_INTENT\n",
+                                          "- **Change Source:** SOMETHING\n"))
+    rej("scope_source", fixed.replace("- **Change Source:** INITIAL_INTENT\n",
+                                      "- **Change Source:** INITIAL_SCOPE\n"))
+    rej("fr_content", fixed.replace("confirm a cart", "confirm a basket"))
+    rej("fr_id", fixed.replace("### FR-001", "### FR-009"))
+    rej("version", fixed.replace("**Spec Version:** 0.1", "**Spec Version:** 0.2"))
+    rej("added_line", fixed + "\n- extra\n")
+    rej("cr_line_rewrite", base.replace("- **Change Source:** {}\n".format(TOK),
+                                         "- **Change Source:** CR-001\n"))
+    # token outside a governed field is never eligible
+    prose = base.replace("## Open Questions", "{} in prose\n\n## Open Questions".format(TOK), 1)
+    e, total, excl = core.find_provenance_occurrences(prose)
+    check("64/prose_excluded", len(e) == 2 and excl == 1 and total == 3, (len(e), total, excl))
+
+
+def test_65_already_canonical_new_lifecycle_needs_no_provenance_repair():
+    root = mkroot()
+    try:
+        check("65/no_eligible_occurrences",
+              core.find_provenance_occurrences(open(_specs_path(root)).read())[0] == [])
+        r = cli.cmd_begin(root, "x")
+        check("65/no_provenance_class",
+              core.REPAIR_CLASS_PROVENANCE not in ((r.get("plan") or {}).get("repair_classes") or []), r)
+    finally:
+        _cleanup(root)
+
+
+def test_66_provenance_repair_fail_closed_writes_nothing():
+    # provenance fixable but ANOTHER defect (unrepairable) remains -> nothing written
+    text = provenance_specs().replace("- **Status:** ACTIVE", "- **Status:** BOGUS_STATUS")
+    root = mkroot(specs=text)
+    try:
+        b = cli.cmd_begin(root, "x")
+        if b["status"] != "ACTIVE":
+            check("66/other_defect_blocked_at_begin_or_finalize", True)
+        else:
+            before = open(_specs_path(root), "rb").read()
+            f = cli.cmd_finalize(root)
+            check("66/finalize_fails_closed", f["status"] == "RECOVERY_REQUIRED", f)
+            check("66/nothing_written", open(_specs_path(root), "rb").read() == before)
+            a = cli.cmd_abort(root, "cleanup")
+            check("66/abort_ok", a["status"] == "ABORTED", a)
+            check("66/specs_identical_after_abort", open(_specs_path(root), "rb").read() == before)
+    finally:
+        _cleanup(root)
+
+
 def main():
     for fn in (
         test_1_eligible_repair_succeeds,
@@ -850,6 +1192,19 @@ def main():
         test_48_source_semantics_change_rejected_by_metadata_check,
         test_49_arbitrary_valid_metadata_field_change_rejected,
         test_50_repair_requires_evidence_field_is_invalid,
+        test_51_failed_transaction_can_be_governedly_aborted,
+        test_52_abort_requires_reason_and_marker,
+        test_53_finalized_transaction_cannot_be_aborted,
+        test_54_abort_fails_closed_on_ambiguous_marker,
+        test_55_abort_rejects_cr_marker_masquerade,
+        test_56_new_lifecycle_change_source_provenance,
+        test_60_provenance_repair_normalizes_only_governed_fields,
+        test_61_three_class_combined_repair,
+        test_62_provenance_blocked_when_not_new_lifecycle,
+        test_63_provenance_blocked_when_approved,
+        test_64_provenance_mutation_boundary,
+        test_65_already_canonical_new_lifecycle_needs_no_provenance_repair,
+        test_66_provenance_repair_fail_closed_writes_nothing,
     ):
         fn()
     total = len(_RESULTS)

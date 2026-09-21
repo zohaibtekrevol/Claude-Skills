@@ -52,8 +52,23 @@ distinct **repair classes**, and never anything else:
   (`metadata_fix_is_field_only`, enforced independently of the derivation
   logic).
 
-Both classes may apply in the same transaction (the metadata fix is
-applied first, then the missing-section append), so a single `finalize`
+* `CHANGE_SOURCE_PROVENANCE_REPAIR` - normalize the **single, exact,
+  generator-produced non-canonical provenance token**
+  `INITIAL_SPECS_GENERATION` to `INITIAL_INTENT`, the canonical initial
+  Change Source of the NEW (Intent + Q&A, no-Scope) lifecycle. Eligible
+  instances are only governed provenance fields: a requirement block's
+  `- **Change Source:**` line and the Change Source cell of a Specification
+  Change History row. Runs only when NEW-lifecycle evidence is proven
+  (no legacy Scope artifact, no ambiguous Scope directory, Intent
+  VALIDATED + PM-approved, canonical Q&A register ready). Never rewrites
+  `INITIAL_SCOPE`, `INITIAL_INTENT`, CR-/FDB-/QST-/PM-DECISION sources or
+  any prose. The validator (PMO-SPEC-013/014) is deliberately NOT loosened:
+  the token stays invalid, and this class exists to remove it.
+  Applied as in-place, line-count-preserving edits verified independently
+  by `provenance_fix_is_token_only`.
+
+All classes may apply in the same transaction (metadata fix first, then
+provenance normalization, then the missing-section append), so a single `finalize`
 call repairs every currently-addressable defect at once - but each class's
 own safety check runs independently, so a bug in one can never mask a
 violation the other would have caught.
@@ -157,6 +172,10 @@ REPAIR_CLASS_METADATA = "DOCUMENT_CONTROL_METADATA_REPAIR"
 # The complete, deliberately small whitelist of required sections this
 # mechanism may add. A caller can never request an arbitrary section be
 # "repaired".
+REPAIR_CLASS_PROVENANCE = "CHANGE_SOURCE_PROVENANCE_REPAIR"
+NONCANONICAL_INITIAL_TOKEN = "INITIAL_SPECS_GENERATION"
+CANONICAL_NEW_INITIAL_TOKEN = "INITIAL_INTENT"
+
 PERMITTED_REPAIR_SECTIONS = ("Validation Summary",)
 
 # The complete, deliberately small whitelist of Document Control fields
@@ -394,6 +413,103 @@ def metadata_fix_is_field_only(before, after, permitted_fields):
 
 
 # --------------------------------------------------------------------------- #
+# CHANGE_SOURCE_PROVENANCE_REPAIR (see module docstring)
+# --------------------------------------------------------------------------- #
+
+_TOKEN = re.escape(NONCANONICAL_INITIAL_TOKEN)
+_PROV_FIELD_RE = re.compile(r"^(- \*\*Change Source:\*\* )" + _TOKEN + r"([ \t]*)$")
+_PROV_HISTORY_RE = re.compile(
+    r"^(\|[^|]*\|[^|]*\|[ \t]*)" + _TOKEN + r"([ \t]*(?:\([^|]*\))?[ \t]*\|.*)$")
+_REQ_HEADING_RE = re.compile(r"^###\s+(?:FR|NFR)-\d+\b")
+_ANY_HEADING_RE = re.compile(r"^#{1,6}\s")
+_HISTORY_HEADING_LINE_RE = re.compile(r"^#{1,6}\s+(?:\d+\.\s+)?specification\s+change\s+history\b",
+                                      re.IGNORECASE)
+
+
+def _provenance_line_kinds(lines):
+    """Yield (index, kind) for every line that is an ELIGIBLE governed
+    provenance field: 'FIELD' (a Change Source line inside an FR/NFR block)
+    or 'HISTORY' (Change Source cell of a Change History table row)."""
+    in_req = False
+    in_history = False
+    for i, line in enumerate(lines):
+        if _ANY_HEADING_RE.match(line):
+            in_req = bool(_REQ_HEADING_RE.match(line))
+            in_history = bool(_HISTORY_HEADING_LINE_RE.match(line))
+            continue
+        if in_req and _PROV_FIELD_RE.match(line):
+            yield i, "FIELD"
+        elif in_history and _PROV_HISTORY_RE.match(line):
+            yield i, "HISTORY"
+
+
+def find_provenance_occurrences(spec_text):
+    """(eligible_indexes: list[(idx, kind)], total_lines, excluded_count)."""
+    lines = (spec_text or "").splitlines()
+    eligible = list(_provenance_line_kinds(lines))
+    total = sum(1 for ln in lines if NONCANONICAL_INITIAL_TOKEN in ln)
+    return eligible, total, total - len(eligible)
+
+
+def prove_new_lifecycle_provenance(root):
+    """Return None when the NEW (no-Scope) lifecycle is positively proven
+    for this project, else a Decision. Fails closed on ambiguity. Reuses the
+    authoritative helpers - never a second lifecycle detector."""
+    if specs_guard.has_legacy_scope(root):
+        return deny(
+            "PMO-SPEC-REPAIR-024",
+            "a legacy Scope artifact exists - Scope governs this project's "
+            "initial provenance; refusing to normalize provenance to "
+            "{}.".format(CANONICAL_NEW_INITIAL_TOKEN))
+    scope_dir = os.path.join(root, "docs", "pmo", "scope")
+    if os.path.isdir(scope_dir) and os.listdir(scope_dir):
+        return deny(
+            "PMO-SPEC-REPAIR-025",
+            "docs/pmo/scope/ is non-empty but holds no recognised Scope "
+            "artifact - lifecycle evidence is ambiguous; failing closed.")
+    kind_msg = qac.validate_new_path_readiness(root)
+    if kind_msg is not None:
+        return deny(
+            "PMO-SPEC-REPAIR-026",
+            "NEW-lifecycle evidence is not proven ({}: {}).".format(*kind_msg))
+    return None
+
+
+def apply_provenance_fix(content):
+    """Replace ONLY the non-canonical token inside eligible governed
+    provenance fields. In-place, line-count preserving."""
+    lines = content.split("\n")
+    for i, kind in _provenance_line_kinds(lines):
+        rx = _PROV_FIELD_RE if kind == "FIELD" else _PROV_HISTORY_RE
+        lines[i] = rx.sub(lambda m: m.group(1) + CANONICAL_NEW_INITIAL_TOKEN + m.group(2),
+                          lines[i], count=1)
+    return "\n".join(lines)
+
+
+def provenance_fix_is_token_only(before, after):
+    """Independent safety net: same line count; every differing line differs
+    from its original ONLY by the token substitution, and was an eligible
+    governed provenance line. Returns (ok, reason-or-changed-count)."""
+    b = before.split("\n")
+    a = after.split("\n")
+    if len(a) != len(b):
+        return False, "the line count changed during a provenance-only fix."
+    eligible = {i for i, _k in _provenance_line_kinds(b)}
+    changed = 0
+    for i, (bl, al) in enumerate(zip(b, a)):
+        if bl == al:
+            continue
+        if i not in eligible:
+            return False, ("a line changed that is not an eligible governed "
+                           "provenance field: {!r}".format(bl))
+        if bl.replace(NONCANONICAL_INITIAL_TOKEN, CANONICAL_NEW_INITIAL_TOKEN, 1) != al:
+            return False, ("a provenance line changed by more than the exact "
+                           "token substitution: {!r} -> {!r}".format(bl, al))
+        changed += 1
+    return True, changed
+
+
+# --------------------------------------------------------------------------- #
 # BEGIN preconditions (read-only)
 # --------------------------------------------------------------------------- #
 
@@ -477,21 +593,37 @@ def run_begin_preconditions(root, reason):
             )
         metadata_fixes["Generated From"] = new_gf
 
+    provenance_fixes = {}
+    eligible_prov, prov_total, prov_excluded = find_provenance_occurrences(content)
+    if eligible_prov:
+        prov_d = prove_new_lifecycle_provenance(root)
+        if prov_d is not None:
+            return None, prov_d
+        provenance_fixes = {
+            "from": NONCANONICAL_INITIAL_TOKEN,
+            "to": CANONICAL_NEW_INITIAL_TOKEN,
+            "field_lines": sum(1 for _i, k in eligible_prov if k == "FIELD"),
+            "history_rows": sum(1 for _i, k in eligible_prov if k == "HISTORY"),
+            "excluded_non_provenance": prov_excluded,
+        }
+
     repair_classes = []
     if supported_missing:
         repair_classes.append(REPAIR_CLASS_MISSING_SECTION)
     if metadata_fixes:
         repair_classes.append(REPAIR_CLASS_METADATA)
+    if provenance_fixes:
+        repair_classes.append(REPAIR_CLASS_PROVENANCE)
 
     if not repair_classes:
         return None, deny(
             "PMO-SPEC-REPAIR-006",
             "the current full_spec_validation failure ({}: {}) is not "
             "addressable by any supported STRUCTURAL_REPAIR class "
-            "({} / {}) - it requires engineering/content review, not a "
-            "structural repair.".format(
+            "({} / {} / {}) - it requires engineering/content review, not "
+            "a structural repair.".format(
                 d.code, d.message, REPAIR_CLASS_MISSING_SECTION,
-                REPAIR_CLASS_METADATA),
+                REPAIR_CLASS_METADATA, REPAIR_CLASS_PROVENANCE),
         )
 
     cfg = load_project_config(root) or {}
@@ -532,6 +664,7 @@ def run_begin_preconditions(root, reason):
         "repair_classes": repair_classes,
         "missing_sections": supported_missing,
         "metadata_fixes": metadata_fixes,
+        "provenance_fixes": provenance_fixes,
         "specs_hash_before": sha256_of_text(content),
     }
     return plan, None
@@ -553,6 +686,7 @@ def build_marker_data(plan, transaction_id, started_at):
         "repair_classes": plan["repair_classes"],
         "missing_sections": plan["missing_sections"],
         "metadata_fixes": plan["metadata_fixes"],
+        "provenance_fixes": plan.get("provenance_fixes") or {},
         "specs_hash_before": plan["specs_hash_before"],
     }
 
@@ -668,6 +802,21 @@ def finalize_transaction(root, marker_data):
             if not ok:
                 return None, deny("PMO-SPEC-REPAIR-011", info)
 
+        # 1b) CHANGE_SOURCE_PROVENANCE_REPAIR - exact-token, in-place,
+        #     line-count-preserving; verified independently.
+        if REPAIR_CLASS_PROVENANCE in repair_classes:
+            if not plan.get("provenance_fixes"):
+                return None, deny("PMO-SPEC-REPAIR-027",
+                                  "no provenance fix remained at finalize time.")
+            prov_before = intermediate
+            intermediate = apply_provenance_fix(prov_before)
+            ok, info = provenance_fix_is_token_only(prov_before, intermediate)
+            if not ok:
+                return None, deny("PMO-SPEC-REPAIR-011", info)
+            if find_provenance_occurrences(intermediate)[0]:
+                return None, deny("PMO-SPEC-REPAIR-027",
+                                  "eligible provenance occurrences remain after the fix.")
+
         # 2) MISSING_REQUIRED_SECTION - purely-appended trailing content,
         #    checked against the (possibly metadata-corrected) intermediate.
         after = intermediate
@@ -717,8 +866,64 @@ def finalize_transaction(root, marker_data):
             "repair_classes": repair_classes,
             "repaired_sections": missing_names,
             "repaired_metadata_fields": sorted(metadata_fixes.keys()),
+            "repaired_provenance": plan.get("provenance_fixes") or {},
             "reason": plan["reason"],
         }, None
     except Exception as exc:  # pragma: no cover - fail closed
         return None, deny("PMO-SPEC-REPAIR-999",
                           "internal error during finalize: {}".format(exc))
+
+
+def abort_transaction(root, marker_data, abort_reason):
+    """Governed recovery for a STRUCTURAL_REPAIR transaction that did NOT
+    finalize (e.g. `finalize` failed closed with RECOVERY_REQUIRED).
+
+    Clears ONLY the runtime marker. Never touches specs.md, approval state,
+    Intent, Q&A, CR or Feedback. A successful `finalize` already removes the
+    marker, so a marker that still exists means "not finalized" - but this
+    never relies on that alone: the transaction is aborted only when the
+    marker's identity (artifact, Spec Version, project) still matches the
+    on-disk Specs AND specs.md is byte-identical to the hash recorded at
+    `begin`. Anything else (changed or missing specs.md, version drift,
+    non-empty reason missing) is ambiguous and fails closed, leaving the
+    marker in place.
+    """
+    try:
+        if not _clean(abort_reason):
+            return None, deny("PMO-SPEC-REPAIR-020",
+                              "abort requires a non-empty --reason.")
+        if marker_data.get("artifact") != SPECS_POSIX:
+            return None, deny(
+                "PMO-SPEC-REPAIR-021",
+                "marker artifact '{}' is not {} - refusing to abort an "
+                "ambiguous transaction.".format(marker_data.get("artifact"), SPECS_POSIX))
+        text = read_text(specs_abspath(root))
+        if text is None:
+            return None, deny(
+                "PMO-SPEC-REPAIR-021",
+                "specs.md is missing - state is ambiguous, refusing to abort.")
+        if sha256_of_text(text) != marker_data.get("specs_hash_before"):
+            return None, deny(
+                "PMO-SPEC-REPAIR-022",
+                "specs.md no longer matches the hash recorded at `begin` - the "
+                "transaction may have finalized or the artifact was edited; "
+                "refusing to abort. Resolve manually.")
+        meta = sac.parse_spec_doc_control(text)
+        if _clean(meta.get("spec_version")) != _clean(marker_data.get("spec_version")):
+            return None, deny(
+                "PMO-SPEC-REPAIR-022",
+                "Spec Version no longer matches the marker - refusing to abort.")
+        try:
+            os.remove(marker_abspath(root))
+        except OSError as exc:
+            return None, deny("PMO-SPEC-REPAIR-023",
+                              "could not remove the marker: {}".format(exc))
+        return {
+            "transaction_id": marker_data.get("transaction_id"),
+            "spec_version": marker_data.get("spec_version"),
+            "specs_hash": marker_data.get("specs_hash_before"),
+            "abort_reason": _clean(abort_reason),
+        }, None
+    except Exception as exc:  # pragma: no cover - fail closed
+        return None, deny("PMO-SPEC-REPAIR-999",
+                          "internal error during abort: {}".format(exc))

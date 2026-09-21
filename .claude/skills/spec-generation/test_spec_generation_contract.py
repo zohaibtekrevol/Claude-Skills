@@ -456,6 +456,25 @@ def test_12_synthetic_compliant_specs_reaches_baseline_ready():
         _cleanup(root)
 
 
+def test_13_new_path_initial_change_source_documented():
+    skill = open(SKILL_MD_PATH, encoding="utf-8").read()
+    check("13/skill_documents_initial_intent_for_new_path",
+          skill is not None and "INITIAL_INTENT" in skill and "path-specific" in skill)
+    check("13/skill_forbids_invented_initial_source",
+          skill is not None and "INITIAL_SPECS_GENERATION" in skill
+          and "not permitted" in skill)
+
+
+def test_14_new_path_example_row_and_no_noncanonical_token_emitted():
+    skill = open(SKILL_MD_PATH, encoding="utf-8").read()
+    check("14/skill_has_new_path_initial_intent_history_row",
+          "| INITIAL_INTENT | FR-001" in skill)
+    # the token may only appear in the Skill as a documented prohibition
+    lines = [l for l in skill.splitlines() if "INITIAL_SPECS_GENERATION" in l]
+    check("14/noncanonical_token_only_in_prohibition",
+          len(lines) >= 1 and all("Do not invent" in l for l in lines), lines)
+
+
 def main():
     for fn in (
         test_01_skill_required_sections_match_guard,
@@ -471,6 +490,8 @@ def main():
         test_10_wm_trucking_current_failure_confirmed_read_only,
         test_11_wm_trucking_still_specs_review_required,
         test_12_synthetic_compliant_specs_reaches_baseline_ready,
+        test_13_new_path_initial_change_source_documented,
+        test_14_new_path_example_row_and_no_noncanonical_token_emitted,
     ):
         fn()
     total = len(_RESULTS)

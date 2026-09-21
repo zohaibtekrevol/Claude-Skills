@@ -30,6 +30,12 @@ Flow
 
 ``status`` is available at any point and is always pure read-only.
 
+    specs-structural-repair.py abort --reason "..."
+        -> governed recovery for a transaction that did NOT finalize (for
+           example a fail-closed finalize): clears only the runtime marker,
+           and only when specs.md is still byte-identical to the hash
+           recorded at ``begin``. Never touches specs.md or approval state.
+
 Security boundary
 -------------------
 This CLI runs via Bash - entirely outside Claude Code's PreToolUse hook
@@ -66,6 +72,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
 from specs_structural_repair_core import (  # noqa: E402
+    abort_transaction,
     build_marker_data,
     deny,
     finalize_transaction,
@@ -179,6 +186,24 @@ def cmd_finalize(root):
     return result
 
 
+def cmd_abort(root, reason):
+    result = _new_result("abort")
+    state, data, err = marker_status(root)
+    if state == "ABSENT":
+        return _fail(result, deny(
+            "PMO-SPEC-REPAIR-016", "no STRUCTURAL_REPAIR transaction is in progress."),
+            status="NO_TRANSACTION")
+    if state in ("INVALID", "WRONG_PROJECT"):
+        return _fail(result, deny("PMO-SPEC-REPAIR-015", err))
+    result["marker"] = data
+    report, decision = abort_transaction(root, data, reason)
+    if decision is not None:
+        return _fail(result, decision)
+    result["report"] = report
+    result["status"] = "ABORTED"
+    return result
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="specs-structural-repair.py")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -187,6 +212,10 @@ def main(argv=None):
     p_begin.add_argument("--reason", required=True)
     p_begin.add_argument("--dry-run", action="store_true")
     p_begin.add_argument("--root", default=None)
+
+    p_abort = sub.add_parser("abort")
+    p_abort.add_argument("--reason", required=True)
+    p_abort.add_argument("--root", default=None)
 
     for name in ("status", "validate", "finalize"):
         p = sub.add_parser(name)
@@ -203,6 +232,8 @@ def main(argv=None):
         result = cmd_validate(root)
     elif args.command == "finalize":
         result = cmd_finalize(root)
+    elif args.command == "abort":
+        result = cmd_abort(root, args.reason)
     else:  # pragma: no cover
         parser.error("unknown command")
         return 1

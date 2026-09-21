@@ -421,7 +421,7 @@ Source Scope:             <SCP-REQ IDs>
 Source Intent:            <INT-REQ IDs where applicable>
 Introduced In:            <Spec Version, e.g. 0.1>
 Last Modified In:         <Spec Version>
-Change Source:            <INITIAL_SCOPE | FDB-XXX | CR-XXX | PM-DECISION>
+Change Source:            <INITIAL_SCOPE (LEGACY) | INITIAL_INTENT (NEW) | FDB-XXX | CR-XXX | PM-DECISION>
 Priority:                 <only when Scope-supported or PM-defined>
 Preconditions:            <conditions that must hold before the trigger>
 Trigger:                  <the event that starts the behaviour>
@@ -620,7 +620,8 @@ Traceability** matrix instead (same heading pattern, `scope`/`intent`/
 Example rows:
 
 ```
-| 0.1 | <date> | Scope v0.1 (INITIAL_SCOPE) | FR-001–FR-0NN, NFR-001–NFR-0MM | Initial provisional specification | Generated |
+| 0.1 | <date> | Scope v0.1 (INITIAL_SCOPE) | FR-001–FR-0NN, NFR-001–NFR-0MM | Initial provisional specification (LEGACY path) | Generated |
+| 0.1 | <date> | INITIAL_INTENT | FR-001–FR-0NN, NFR-001–NFR-0MM | Initial provisional specification (NEW no-Scope path) | Generated |
 | 0.2 | <date> | FDB-001 | FR-014, FR-021 | Client clarification of checkout confirmation step | Accepted |
 ```
 
@@ -631,7 +632,15 @@ Rules:
 - `Changed IDs` lists exactly the FR/NFR/BR identifiers added or modified in that
   version (a range is acceptable for the initial row).
 - `Change Source` is one of `INITIAL_SCOPE`, `Scope vX.Y`, `FDB-XXX`, `CR-XXX`,
-  `PM-DECISION`.
+  `PM-DECISION`, or `INITIAL_INTENT`.
+- **Initial baseline provenance is path-specific.** LEGACY (a Scope exists):
+  `INITIAL_SCOPE`. NEW (no-Scope, Section 2a): `INITIAL_INTENT` - on the
+  initial (0.1) Change History row **and** on every initial requirement's
+  `Change Source` (a Q&A-sourced requirement may instead cite its `QST-###`).
+  Do not invent other tokens (for example `INITIAL_SPECS_GENERATION`): they
+  are not permitted values and fail `PMO-SPEC-013` / `PMO-SPEC-014`. Never
+  write `INITIAL_SCOPE` on the NEW path - no Scope exists, so it would be a
+  false provenance statement.
 
 ---
 
